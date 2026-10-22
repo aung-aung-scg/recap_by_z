@@ -417,7 +417,7 @@ class App(tk.Tk):
             return scale
 
         section(0, "Video")
-        self.zoom_slider = slider_row(1, "Zoom", 1.00, 1.25, self.zoom_factor, self._zoom_changed,
+        self.zoom_slider = slider_row(1, "Zoom", 0.80, 1.25, self.zoom_factor, self._zoom_changed,
                                       "zoom_value_label", f"{float(self.zoom_factor.get()):.2f}x")
         self.zoom_slider.bind("<ButtonRelease-1>", lambda _e: self._refresh_preview())
         ttk.Checkbutton(
@@ -1115,8 +1115,8 @@ class App(tk.Tk):
             if not (runtime_root / rel).is_file():
                 raise ValueError(f"Bundled Recap runtime file missing: {rel}")
         zoom = float(self.zoom_factor.get())
-        if not (1.0 <= zoom <= 1.25):
-            raise ValueError("Zoom must be between 1.00 and 1.25")
+        if not (0.80 <= zoom <= 1.25):
+            raise ValueError("Zoom must be between 0.80 and 1.25")
         logo_enabled = bool(self.logo_enabled.get())
         logo_path = self.logo_path.get().strip() if logo_enabled else ""
         overlays = {

@@ -56,7 +56,7 @@ def main() -> int:
             max_video_speed=float(cfg.get("max_video_speed", 1.5)),
             max_video_slow=float(cfg.get("max_video_slow", 1.35)),
             mirror_video=bool(cfg.get("mirror_video", False)),
-            zoom_factor=float(cfg.get("zoom_factor", 1.05)),
+            zoom_factor=float(cfg.get("zoom_factor", 0.90)),
             smooth_freeze_fallback=bool(cfg.get("smooth_freeze_fallback", False)),
             max_freeze_hold=float(cfg.get("max_freeze_hold", 0.75)),
             render_final_video=bool(cfg.get("render_final_video", True)),

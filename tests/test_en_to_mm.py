@@ -88,6 +88,7 @@ class OnlyEnglishToMyanmarTests(unittest.TestCase):
             self.assertEqual(result, output)
             contents = output.read_text(encoding="utf-8")
         self.assertIn("Dialogue: 0,0:00:01.25,0:00:03.50,Default", contents)
+        self.assertIn("WrapStyle: 0", contents)
         self.assertIn(r"A \{title\}\\line\Nမြန်မာစာ", contents)
 
     def test_subtitle_area_matches_the_visible_picture_not_the_canvas(self):
@@ -98,6 +99,15 @@ class OnlyEnglishToMyanmarTests(unittest.TestCase):
         self.assertEqual(
             core._subtitle_content_rect((1920, 1080), (1080, 1920), "crop"),
             (0, 0, 1920, 1080),
+        )
+
+    def test_subtitle_font_is_sized_for_narrow_portrait_picture(self):
+        self.assertEqual(core._subtitle_font_size((656, 0, 608, 1080)), 10)
+
+    def test_subtitle_text_is_wrapped_to_a_bounded_line_length(self):
+        self.assertEqual(
+            core._wrap_subtitle_text("A long caption with an exceptionallylongword", 12),
+            "A long\ncaption with\nan\nexceptionall\nylongword",
         )
 
     def test_smart_sync_caps_the_speed_then_trims(self):

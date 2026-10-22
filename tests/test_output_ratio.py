@@ -44,6 +44,17 @@ class LayoutTests(unittest.TestCase):
         crop, _ = core._visual_filters(False, 1.0, core.frame_layout("9:16", "crop", 1920, 1080))
         self.assertIn("crop=1080:1920", crop)
 
+    def test_near_matching_ratio_black_fill_keeps_the_full_source(self):
+        black, _ = core._visual_filters(False, 1.0, core.frame_layout("9:16", "black", 480, 850))
+        self.assertIn("pad=1080:1920:0:4:color=black", black)
+        self.assertNotIn("force_original_aspect_ratio=increase", black)
+
+    def test_ninety_percent_zoom_insets_image_and_keeps_source_captions_in_frame(self):
+        black, zoom = core._visual_filters(False, 0.9, core.frame_layout("9:16", "black", 480, 850))
+        self.assertEqual(zoom, 0.9)
+        self.assertIn("scale=972:1720", black)
+        self.assertIn("pad=1080:1920:54:100:color=black", black)
+
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "ffmpeg/ffprobe not on PATH")
 class RenderTests(unittest.TestCase):
@@ -109,7 +120,11 @@ class RenderTests(unittest.TestCase):
         output = core.apply_production_overlays(
             FFMPEG, base, self.dir / "with_subtitles.mp4", {}, "libx264", self.dir,
             frame_size=(320, 180),
-            subtitles=[{"start": 0.5, "end": 1.5, "text": "A visible caption"}],
+            subtitles=[{
+                "start": 0.5,
+                "end": 1.5,
+                "text": "When that human's eyes look better, the person appears much more comfortable.",
+            }],
             source_size=(180, 320),
             fill="black",
         )
@@ -119,13 +134,16 @@ class RenderTests(unittest.TestCase):
             subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-ss", str(timestamp), "-i",
                             str(output), "-frames:v", "1", str(frame)], check=True)
             image = Image.open(frame).convert("RGB")
-            inside = image.crop((100, 0, 220, 180)).convert("L").point(
+            inside = image.crop((120, 0, 200, 180)).convert("L").point(
                 lambda value: 255 if value > 150 else 0
             )
-            outside = image.crop((0, 0, 95, 180)).convert("L").point(
+            outside = image.crop((0, 0, 107, 180)).convert("L").point(
                 lambda value: 255 if value > 150 else 0
             )
-            return inside.histogram()[255], outside.histogram()[255]
+            outside_right = image.crop((213, 0, 320, 180)).convert("L").point(
+                lambda value: 255 if value > 150 else 0
+            )
+            return inside.histogram()[255], outside.histogram()[255] + outside_right.histogram()[255]
 
         inside, outside = caption_pixels_at(1.0)
         self.assertGreater(inside, 10)

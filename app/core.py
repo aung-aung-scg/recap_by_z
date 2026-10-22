@@ -317,6 +317,38 @@ def _subtitle_content_rect(
     return x, y, picture_width, picture_height
 
 
+def _subtitle_font_size(content_rect: tuple[int, int, int, int]) -> int:
+    content_width, content_height = content_rect[2], content_rect[3]
+    return max(10, int(round(min(content_width, content_height) * 0.015)))
+
+
+def _wrap_subtitle_text(text: str, max_chars: int) -> str:
+    line_limit = max(1, int(max_chars))
+    lines: list[str] = []
+    for paragraph in str(text).replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = ""
+        for original_word in paragraph.split():
+            word = original_word
+            while len(word) > line_limit:
+                if line:
+                    lines.append(line)
+                    line = ""
+                lines.append(word[:line_limit])
+                word = word[line_limit:]
+            if not word:
+                continue
+            if not line:
+                line = word
+            elif len(line) + len(word) + 1 <= line_limit:
+                line = f"{line} {word}"
+            else:
+                lines.append(line)
+                line = word
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
+
+
 def _write_subtitle_ass(
     subtitles: list[dict[str, Any]],
     output: Path,
@@ -326,10 +358,15 @@ def _write_subtitle_ass(
     events: list[str] = []
     width, height = (int(frame_size[0]), int(frame_size[1]))
     x, y, content_width, content_height = content_rect or (0, 0, width, height)
-    horizontal_margin = max(12, int(round(content_width * 0.05)))
+    horizontal_margin = max(16, int(round(content_width * 0.12)))
     margin_left = x + horizontal_margin
     margin_right = width - (x + content_width) + horizontal_margin
     margin_v = height - (y + content_height) + max(12, int(round(content_height * 0.055)))
+    font_size = _subtitle_font_size((x, y, content_width, content_height))
+    max_line_chars = max(
+        1,
+        int((content_width - 2 * horizontal_margin) / max(1, font_size * 1.6)),
+    )
     for subtitle in subtitles:
         text = str(subtitle.get("text") or "").strip()
         if not text:
@@ -339,12 +376,12 @@ def _write_subtitle_ass(
             raise ValueError(f"Invalid subtitle interval: {start}–{end}")
         events.append(
             f"Dialogue: 0,{_ass_timestamp(start)},{_ass_timestamp(end)},Default,,"
-            f"{margin_left},{margin_right},{margin_v},,{_ass_escape(text)}"
+            f"{margin_left},{margin_right},{margin_v},,"
+            f"{_ass_escape(_wrap_subtitle_text(text, max_line_chars))}"
         )
     if not events:
         return None
 
-    font_size = max(18, int(round(min(content_width, content_height) * 0.046)))
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         "\n".join([
@@ -651,25 +688,34 @@ def _visual_filters(mirror_video: bool, zoom_factor: float,
                     layout: dict[str, Any] | None = None) -> tuple[str, float]:
     """Flip + zoom + placement on the output frame, as one filtergraph string.
 
-    Crop (and any source already of the frame's shape) fills the frame and cuts the overflow —
-    exactly the old 16:9 behaviour. Blur / black keep the whole picture visible, centred, with a
-    blurred copy of it or black bars in the free room. Zoom always zooms the picture itself.
+    Crop fills the frame and cuts overflow. Blur / black keep the picture centred, with a
+    blurred copy or black bars in the free room. Zoom below 1.0 insets the picture.
     """
     zoom = max(1.0, min(float(zoom_factor), 1.25))
     lay = layout or {"fill": "crop", "cw": 1920, "ch": 1080, "sw": 0, "sh": 0}
     cw, ch = int(lay["cw"]), int(lay["ch"])
     sw, sh = int(lay.get("sw") or 0) or cw, int(lay.get("sh") or 0) or ch
     head = "hflip," if mirror_video else ""
-    if lay.get("fill") == "crop" or abs(sw / sh - cw / ch) < 0.01:
+    if lay.get("fill") == "crop" and zoom >= 1.0 or (
+        abs(sw / sh - cw / ch) < 0.01 and zoom > 1.0
+    ):
         fill_w, fill_h = max(cw, _even(cw * zoom)), max(ch, _even(ch * zoom))
         return (f"{head}scale={fill_w}:{fill_h}:force_original_aspect_ratio=increase,"
                 f"crop={cw}:{ch},setsar=1,format=yuv420p"), zoom
     scale = min(cw / sw, ch / sh)
     pw, ph = min(cw, _even(sw * scale)), min(ch, _even(sh * scale))
-    zw, zh = max(pw, _even(pw * zoom)), max(ph, _even(ph * zoom))
+    zw, zh = _even(pw * zoom), _even(ph * zoom)
+    if zoom >= 1.0:
+        zw, zh = max(pw, zw), max(ph, zh)
+    else:
+        zw, zh = max(2, zw), max(2, zh)
     ox, oy = _even((cw - pw) / 2.0) if cw > pw else 0, _even((ch - ph) / 2.0) if ch > ph else 0
-    picture = f"scale={zw}:{zh},crop={pw}:{ph},setsar=1"
-    if lay.get("fill") == "black":
+    if zoom < 1.0:
+        ox, oy = _even((cw - zw) / 2.0), _even((ch - zh) / 2.0)
+        picture = f"scale={zw}:{zh},setsar=1"
+    else:
+        picture = f"scale={zw}:{zh},crop={pw}:{ph},setsar=1"
+    if lay.get("fill") == "black" or (lay.get("fill") == "crop" and zoom < 1.0):
         return f"{head}{picture},pad={cw}:{ch}:{ox}:{oy}:color=black,setsar=1,format=yuv420p", zoom
     bw, bh = _even(cw / 4.0), _even(ch / 4.0)  # the blurred copy is made small (fast), then scaled up
     luma = max(1, min(14, min(bw, bh) // 2 - 1))
@@ -764,7 +810,7 @@ def render_video_part(
     target_duration: float,
     encoder: str,
     mirror_video: bool = False,
-    zoom_factor: float = 1.05,
+    zoom_factor: float = 0.90,
     max_video_speed: float = 1.25,
     max_video_slow: float = 1.35,
     smooth_freeze_fallback: bool = False,
@@ -1148,7 +1194,7 @@ class EdgeSmartSync:
         max_video_speed: float = 1.25,
         max_video_slow: float = 1.35,
         mirror_video: bool = False,
-        zoom_factor: float = 1.05,
+        zoom_factor: float = 0.90,
         smooth_freeze_fallback: bool = False,
         max_freeze_hold: float = 0.75,
         render_final_video: bool = True,
@@ -1172,7 +1218,7 @@ class EdgeSmartSync:
         self.max_video_speed = max(1.0, float(max_video_speed))
         self.max_video_slow = max(1.0, float(max_video_slow))
         self.mirror_video = bool(mirror_video)
-        self.zoom_factor = max(1.0, min(float(zoom_factor), 1.25))
+        self.zoom_factor = max(0.80, min(float(zoom_factor), 1.25))
         self.output_ratio = output_ratio if output_ratio in OUTPUT_RATIOS else "16:9"
         self.frame_fill = frame_fill if frame_fill in FRAME_FILLS else "blur"
         self.smooth_freeze_fallback = bool(smooth_freeze_fallback)
