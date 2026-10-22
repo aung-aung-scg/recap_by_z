@@ -99,6 +99,39 @@ class RenderTests(unittest.TestCase):
             "libx264", self.dir, frame_size=(1080, 1920))
         self.assertEqual(self._size_and_frames(out)[:2], (1080, 1920))
 
+    def test_subtitles_are_burned_in_only_during_their_audio_interval(self):
+        from PIL import Image
+
+        base = self.dir / "black.mp4"
+        subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                        "color=c=black:s=320x180:r=30:d=3", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        str(base)], check=True)
+        output = core.apply_production_overlays(
+            FFMPEG, base, self.dir / "with_subtitles.mp4", {}, "libx264", self.dir,
+            frame_size=(320, 180),
+            subtitles=[{"start": 0.5, "end": 1.5, "text": "A visible caption"}],
+            source_size=(180, 320),
+            fill="black",
+        )
+
+        def caption_pixels_at(timestamp: float) -> tuple[int, int]:
+            frame = self.dir / f"subtitle_{timestamp}.png"
+            subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-ss", str(timestamp), "-i",
+                            str(output), "-frames:v", "1", str(frame)], check=True)
+            image = Image.open(frame).convert("RGB")
+            inside = image.crop((100, 0, 220, 180)).convert("L").point(
+                lambda value: 255 if value > 150 else 0
+            )
+            outside = image.crop((0, 0, 95, 180)).convert("L").point(
+                lambda value: 255 if value > 150 else 0
+            )
+            return inside.histogram()[255], outside.histogram()[255]
+
+        inside, outside = caption_pixels_at(1.0)
+        self.assertGreater(inside, 10)
+        self.assertEqual(outside, 0)
+        self.assertEqual(caption_pixels_at(2.0), (0, 0))
+
     def test_preview_frame_matches_the_ratio(self):
         out = self.dir / "preview.png"
         preview_tools.extract_preview_frame(FFMPEG, str(self.src), 1.0, 1.05, True, str(out), 216, 384,

@@ -17,6 +17,8 @@ from typing import Any, Callable, Iterable
 
 
 LogFn = Callable[[str], None]
+
+
 def _noop(_: str) -> None:
     pass
 
@@ -281,6 +283,91 @@ def _subtitle_segments(timing: list[dict[str, Any]]) -> list[dict[str, Any]]:
          "text": item.get("source_text") or item["text"]}
         for item in timing
     ]
+
+
+def _ass_timestamp(seconds: float) -> str:
+    centiseconds = max(0, int(round(float(seconds) * 100)))
+    hours, remainder = divmod(centiseconds, 360_000)
+    minutes, remainder = divmod(remainder, 6_000)
+    whole_seconds, fraction = divmod(remainder, 100)
+    return f"{hours}:{minutes:02d}:{whole_seconds:02d}.{fraction:02d}"
+
+
+def _ass_escape(text: str) -> str:
+    value = str(text).replace("\\", "\\\\").replace("{", r"\{").replace("}", r"\}")
+    return value.replace("\r\n", "\n").replace("\r", "\n").replace("\n", r"\N")
+
+
+def _subtitle_content_rect(
+    frame_size: tuple[int, int],
+    source_size: tuple[int, int] | None,
+    fill: str,
+) -> tuple[int, int, int, int]:
+    width, height = (int(frame_size[0]), int(frame_size[1]))
+    if fill == "crop" or not source_size or not all(source_size):
+        return 0, 0, width, height
+    source_width, source_height = (int(source_size[0]), int(source_size[1]))
+    scale = min(width / source_width, height / source_height)
+    picture_width = min(width, _even(source_width * scale))
+    picture_height = min(height, _even(source_height * scale))
+    x = _even((width - picture_width) / 2) if width > picture_width else 0
+    y = _even((height - picture_height) / 2) if height > picture_height else 0
+    return x, y, picture_width, picture_height
+
+
+def _write_subtitle_ass(
+    subtitles: list[dict[str, Any]],
+    output: Path,
+    frame_size: tuple[int, int],
+    content_rect: tuple[int, int, int, int] | None = None,
+) -> Path | None:
+    events: list[str] = []
+    width, height = (int(frame_size[0]), int(frame_size[1]))
+    x, y, content_width, content_height = content_rect or (0, 0, width, height)
+    horizontal_margin = max(12, int(round(content_width * 0.05)))
+    margin_left = x + horizontal_margin
+    margin_right = width - (x + content_width) + horizontal_margin
+    margin_v = height - (y + content_height) + max(12, int(round(content_height * 0.055)))
+    for subtitle in subtitles:
+        text = str(subtitle.get("text") or "").strip()
+        if not text:
+            continue
+        start, end = float(subtitle["start"]), float(subtitle["end"])
+        if end <= start:
+            raise ValueError(f"Invalid subtitle interval: {start}–{end}")
+        events.append(
+            f"Dialogue: 0,{_ass_timestamp(start)},{_ass_timestamp(end)},Default,,"
+            f"{margin_left},{margin_right},{margin_v},,{_ass_escape(text)}"
+        )
+    if not events:
+        return None
+
+    font_size = max(18, int(round(min(content_width, content_height) * 0.046)))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        "\n".join([
+            "[Script Info]",
+            "ScriptType: v4.00+",
+            f"PlayResX: {width}",
+            f"PlayResY: {height}",
+            "WrapStyle: 0",
+            "ScaledBorderAndShadow: yes",
+            "",
+            "[V4+ Styles]",
+            "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,"
+            "Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,"
+            "Alignment,MarginL,MarginR,MarginV,Encoding",
+            f"Style: Default,Arial,{font_size},&H00FFFFFF,&H000000FF,&H00101010,&H80000000,"
+            f"1,0,0,0,100,100,0,0,1,3,1,2,{margin_left},{margin_right},{margin_v},1",
+            "",
+            "[Events]",
+            "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
+            *events,
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    return output
 
 
 def _stamp(seconds: float) -> str:
@@ -873,21 +960,31 @@ def apply_production_overlays(
     work_dir: Path,
     log: LogFn = _noop,
     frame_size: tuple[int, int] = (1920, 1080),
+    subtitles: list[dict[str, Any]] | None = None,
+    source_size: tuple[int, int] | None = None,
+    fill: str = "crop",
 ) -> Path:
     overlays = dict(overlays or {})
+    work_dir = work_dir.resolve()
     fw, fh = int(frame_size[0]), int(frame_size[1])
     text_width = int(fw * 0.78)  # 1500 px on the 1920 frame
-    boxes = [x for x in (overlays.get("blur_boxes") or []) if isinstance(x, dict)]
+    boxes = [box for box in (overlays.get("blur_boxes") or []) if isinstance(box, dict)]
     title_text = str(overlays.get("title_text") or "").strip()
     # V19: logo overlay is explicitly opt-in. Legacy callers without the flag keep
     # their old behavior; new UI sends logo_enabled on every run.
     logo_enabled = bool(overlays.get("logo_enabled", True))
     logo_path = str(overlays.get("logo_path") or "").strip() if logo_enabled else ""
-    logo_file = Path(logo_path) if logo_path else None
+    logo_file = Path(logo_path).resolve() if logo_path else None
     extra_text = str(overlays.get("extra_text") or "").strip()
-    if not boxes and not title_text and not extra_text and not (logo_file and logo_file.is_file()):
+    subtitle_file = _write_subtitle_ass(
+        subtitles or [], work_dir / "subtitle_overlay.ass", (fw, fh),
+        _subtitle_content_rect((fw, fh), source_size, fill),
+    )
+    if not boxes and not title_text and not extra_text and not (logo_file and logo_file.is_file()) and not subtitle_file:
         return input_video
 
+    input_video = input_video.resolve()
+    output_video = output_video.resolve()
     cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(input_video)]
     input_index = 1
     title_file: Path | None = None
@@ -979,9 +1076,13 @@ def apply_production_overlays(
         graph.append(f"{current}[etxt]overlay=x='W*{ex:.6f}-w/2':y='H*{ey:.6f}-h/2':eof_action=repeat[{out}]")
         current = f"[{out}]"
 
+    if subtitle_file:
+        graph.append(f"{current}ass=filename={subtitle_file.name}[vsub]")
+        current = "[vsub]"
+
     graph.append(f"{current}format=yuv420p[vout]")
     cmd += ["-filter_complex", ";".join(graph), "-map", "[vout]", "-an"] + _encoder_args(encoder) + ["-movflags", "+faststart", str(output_video)]
-    p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=work_dir)
     if p.returncode != 0 and encoder == "h264_nvenc":
         log("⚠️ Overlay NVENC failed — libx264 fallback")
         cmd2 = cmd[:]
@@ -989,7 +1090,7 @@ def apply_production_overlays(
         map_pos = cmd2.index("-map")
         prefix = cmd2[:map_pos] + ["-map", "[vout]", "-an"]
         cmd2 = prefix + _encoder_args("libx264") + ["-movflags", "+faststart", str(output_video)]
-        p = subprocess.run(cmd2, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        p = subprocess.run(cmd2, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=work_dir)
     if p.returncode != 0 or not output_video.is_file() or output_video.stat().st_size < 5000:
         raise RuntimeError("Production overlay render failed: " + p.stderr[-3000:])
     return output_video
@@ -1379,11 +1480,14 @@ class EdgeSmartSync:
         concat_video_parts(self.ffmpeg, video_parts, paths.synced_video_noaudio, paths.work)
         self._log_sync_check(paths, segments, checkpoint)
         video_for_mux = paths.synced_video_noaudio
-        if self.overlays.get("blur_boxes") or str(self.overlays.get("title_text") or "").strip() or str(self.overlays.get("logo_path") or "").strip() or str(self.overlays.get("extra_text") or "").strip():
-            self.log("🎨 Production overlay pass — Blur / Title PNG / Logo...")
+        if out_plan["subtitle_segments"] or self.overlays.get("blur_boxes") or str(self.overlays.get("title_text") or "").strip() or str(self.overlays.get("logo_path") or "").strip() or str(self.overlays.get("extra_text") or "").strip():
+            self.log("🎨 Production overlay pass — Subtitles / Blur / Title PNG / Logo...")
             video_for_mux = apply_production_overlays(
                 self.ffmpeg, paths.synced_video_noaudio, paths.decorated_video_noaudio,
                 self.overlays, encoder, paths.work, self.log, frame_size=(layout["cw"], layout["ch"]),
+                subtitles=out_plan["subtitle_segments"],
+                source_size=(layout["sw"], layout["sh"]),
+                fill=layout["fill"],
             )
         self.log("🎧 Edge TTS audio mux...")
         volume_percent = int(getattr(self, "voice_volume_percent", 100) or 100)

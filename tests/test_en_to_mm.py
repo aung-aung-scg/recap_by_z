@@ -3,6 +3,7 @@ Sync plan stays V2. Since 2026-10-17 the SOURCE may be any language (test_source
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -73,6 +74,29 @@ class OnlyEnglishToMyanmarTests(unittest.TestCase):
             {"audio_start": 2.0, "audio_end": 4.0, "text": "Older plan narration."},
         ])
         self.assertEqual([item["text"] for item in subtitles], ["English source.", "Older plan narration."])
+
+    def test_subtitle_ass_preserves_unicode_and_escapes_ass_controls(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "captions.ass"
+            result = core._write_subtitle_ass(
+                [{"start": 1.25, "end": 3.5, "text": "A {title}\\line\nမြန်မာစာ"}],
+                output,
+                (1920, 1080),
+            )
+            self.assertEqual(result, output)
+            contents = output.read_text(encoding="utf-8")
+        self.assertIn("Dialogue: 0,0:00:01.25,0:00:03.50,Default", contents)
+        self.assertIn(r"A \{title\}\\line\Nမြန်မာစာ", contents)
+
+    def test_subtitle_area_matches_the_visible_picture_not_the_canvas(self):
+        self.assertEqual(
+            core._subtitle_content_rect((1920, 1080), (1080, 1920), "black"),
+            (656, 0, 608, 1080),
+        )
+        self.assertEqual(
+            core._subtitle_content_rect((1920, 1080), (1080, 1920), "crop"),
+            (0, 0, 1920, 1080),
+        )
 
     def test_smart_sync_caps_the_speed_then_trims(self):
         _vf, fast = core._sync_filter(10.0, 4.0, max_video_speed=1.25)

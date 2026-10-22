@@ -419,8 +419,12 @@ class App(tk.Tk):
         self.zoom_slider = slider_row(1, "Zoom", 1.00, 1.25, self.zoom_factor, self._zoom_changed,
                                       "zoom_value_label", f"{float(self.zoom_factor.get()):.2f}x")
         self.zoom_slider.bind("<ButtonRelease-1>", lambda _e: self._refresh_preview())
-        ttk.Checkbutton(self.zoom_slider.master, text="Flip (mirror left ↔ right)", variable=self.mirror_video,
-                        command=self._mirror_changed).grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(
+            self.zoom_slider.master,
+            text="Mirror video (also reverses on-screen text)",
+            variable=self.mirror_video,
+            command=self._mirror_changed,
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
         self._voice_volume_scale_var = tk.DoubleVar(value=float(self.voice_volume.get()))
         volume_frame = ttk.Frame(self.zoom_slider.master)
         volume_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0))
@@ -453,7 +457,6 @@ class App(tk.Tk):
         ttk.Button(blur_row, text="Delete Selected", style="Compact.TButton", command=self._delete_selected_blur).pack(side="left", padx=6)
         self.blur_count_label = ttk.Label(blur_row, text="0 box", style="Muted.TLabel")
         self.blur_count_label.pack(side="left", padx=(4, 0))
-
         section(6, "Title")
         self.title_entry = ttk.Entry(tools, textvariable=self.title_text, font=("Myanmar Text", 10))
         self.title_entry.grid(row=7, column=0, sticky="ew", pady=(5, 4))

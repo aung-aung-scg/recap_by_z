@@ -127,6 +127,7 @@ class ShortPausesPipelineTests(unittest.TestCase):
                  mock.patch.object(core, "ffmpeg_encoders", return_value={"libx264"}), \
                  mock.patch.object(core, "render_video_part", side_effect=fake_render), \
                  mock.patch.object(core, "concat_video_parts", side_effect=lambda _f, _p, out, _w: Path(out).write_bytes(b"v" * 6000)), \
+                 mock.patch.object(core, "apply_production_overlays", side_effect=lambda _f, video, *_args, **_kwargs: video), \
                  mock.patch.object(core, "mux_audio", side_effect=lambda _f, _v, _a, out, *_x: Path(out).write_bytes(b"m" * 6000)):
                 runner.run()
             plan = json.loads((job / "edge_tts_smart_sync" / "smart_sync_plan_edge_tts.json").read_text(encoding="utf-8"))
