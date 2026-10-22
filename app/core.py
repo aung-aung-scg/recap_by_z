@@ -277,7 +277,9 @@ def normalize_segments(plan: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-def _subtitle_segments(timing: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _subtitle_segments(timing: list[dict[str, Any]], enabled: bool = False) -> list[dict[str, Any]]:
+    if not enabled:
+        return []
     return [
         {"start": item["audio_start"], "end": item["audio_end"],
          "text": item.get("source_text") or item["text"]}
@@ -1367,7 +1369,9 @@ class EdgeSmartSync:
         out_plan["actual_audio_duration"] = round(final_audio_duration, 3)
         out_plan["tts_timing_segments"] = timing
         out_plan["sync_segments"] = sync_segments
-        out_plan["subtitle_segments"] = _subtitle_segments(timing)
+        out_plan["subtitle_segments"] = _subtitle_segments(
+            timing, enabled=bool(self.overlays.get("subtitles_enabled", False))
+        )
         out_plan["production_overlays"] = self.overlays
         atomic_write_json(paths.plan, out_plan)
 

@@ -69,10 +69,12 @@ class OnlyEnglishToMyanmarTests(unittest.TestCase):
         self.assertEqual(windows, [(0.0, 4.0), (4.0, 10.0)])
 
     def test_subtitles_use_original_source_text(self):
-        subtitles = core._subtitle_segments([
+        timing = [
             {"audio_start": 0.0, "audio_end": 2.0, "text": "မြန်မာဘာသာပြန်", "source_text": "English source."},
             {"audio_start": 2.0, "audio_end": 4.0, "text": "Older plan narration."},
-        ])
+        ]
+        self.assertEqual(core._subtitle_segments(timing), [])
+        subtitles = core._subtitle_segments(timing, enabled=True)
         self.assertEqual([item["text"] for item in subtitles], ["English source.", "Older plan narration."])
 
     def test_subtitle_ass_preserves_unicode_and_escapes_ass_controls(self):

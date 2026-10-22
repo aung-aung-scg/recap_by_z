@@ -249,7 +249,7 @@ videos into parts.
    Output ratio **16:9** (1920×1080), **9:16** (1080×1920), **1:1** (1080×1080) or **Original**
    (the source shape, long side at most 1920); when the source has another shape, **Fill** decides:
    Blur background, Black bars or Crop to fill. Optional zoom/flip; NVENC or libx264.
-7. **Subtitles** — original transcript text is burned into the visible picture area and timed to the Myanmar voice.
+7. **Subtitles** — optional original-transcript captions, timed to the Myanmar voice and off by default. Enable “Show original transcript captions” in the Video settings to burn them in. Use a Blur Box to hide subtitles already embedded in the source video.
 8. **Production tools** — blur boxes, title, logo and an extra text box placed on the preview.
 
 The output has only the Myanmar voice (no original audio or music).

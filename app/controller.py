@@ -155,6 +155,7 @@ class App(tk.Tk):
         self.max_speed = tk.StringVar(value=str(self.cfg.get("max_video_speed", 1.25)))
         self.max_slow = tk.StringVar(value=str(self.cfg.get("max_video_slow", 1.35)))
         self.mirror_video = tk.BooleanVar(value=bool(self.cfg.get("mirror_video", False)))
+        self.subtitles_enabled = tk.BooleanVar(value=bool(self.cfg.get("subtitles_enabled", False)))
         self.voice_volume = tk.IntVar(value=int(self.cfg.get("voice_volume_percent", 100) or 100))
         self.short_pauses = tk.BooleanVar(value=bool(self.cfg.get("short_pauses", True)))
         self.zoom_factor = tk.DoubleVar(value=float(self.cfg.get("zoom_factor", 1.05)))
@@ -449,6 +450,11 @@ class App(tk.Tk):
         fill_combo.grid(row=0, column=3, sticky="ew")
         for combo in (ratio_combo, fill_combo):
             combo.bind("<<ComboboxSelected>>", lambda _e: self._frame_changed())
+        ttk.Checkbutton(
+            self.zoom_slider.master,
+            text="Show original transcript captions",
+            variable=self.subtitles_enabled,
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
         section(3, "Blur Watermark Area")
         blur_row = ttk.Frame(tools)
@@ -1037,6 +1043,8 @@ class App(tk.Tk):
                     self.logo_width_frac.set(float(ed.get("logo_width_fraction", self.logo_width_frac.get())))
                     self.logo_opacity.set(float(ed.get("logo_opacity", self.logo_opacity.get())))
                     self.extra_text.set(str(ed.get("extra_text") or ""))
+                    if "subtitles_enabled" in ed:
+                        self.subtitles_enabled.set(bool(ed["subtitles_enabled"]))
                     self.extra_text_pos = list(ed.get("extra_text_position") or self.extra_text_pos)
                     self.extra_text_size.set(int(ed.get("extra_text_font_size", self.extra_text_size.get())))
                     self.extra_text_opacity.set(float(ed.get("extra_text_opacity", self.extra_text_opacity.get())))
@@ -1065,6 +1073,7 @@ class App(tk.Tk):
         # Engine settings stay fixed/hidden; only user-facing production values persist.
         self.cfg["zoom_factor"] = settings["zoom_factor"]
         self.cfg["mirror_video"] = bool(settings["mirror_video"])
+        self.cfg["subtitles_enabled"] = bool(settings["overlays"].get("subtitles_enabled", False))
         self.cfg["voice_volume_percent"] = int(settings.get("voice_volume_percent", 100))
         self.cfg["short_pauses"] = bool(settings.get("short_pauses", True))
         self.cfg["output_ratio"] = settings["output_ratio"]
@@ -1113,6 +1122,7 @@ class App(tk.Tk):
         overlays = {
             "blur_boxes": [dict(x) for x in self.blur_boxes],
             "blur_strength": int(self.cfg.get("overlay_blur_strength", 18)),
+            "subtitles_enabled": bool(self.subtitles_enabled.get()),
             "title_text": self.title_text.get().strip(),
             "title_position": [float(self.title_pos[0]), float(self.title_pos[1])],
             "title_font_size": int(self.title_size.get()),
