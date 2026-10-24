@@ -77,7 +77,7 @@ class TrimEdgeSilenceTests(unittest.TestCase):
 
 
 class ShortPausesPipelineTests(unittest.TestCase):
-    def _run(self, short_pauses: bool) -> tuple[list[float], dict]:
+    def _run(self, short_pauses: bool) -> tuple[list[float], list[float], list[float], list[float], dict]:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             job = base / "job"
@@ -86,12 +86,15 @@ class ShortPausesPipelineTests(unittest.TestCase):
             source.write_bytes(b"source")
             plan_path = job / "smart_sync_plan.json"
             plan_path.write_text(json.dumps({"segments": [
-                # window 1.2 s: floor 0.96 s, trimmed clip 1.25 s fits
+                # Overlong narration is fitted to its source interval, never by dropping footage.
                 {"video_start": 0.0, "video_end": 1.2, "narration": "ပထမ စာကြောင်း။"},
-                # window 3.6 s: floor 2.88 s, trimmed clip 2.25 s would cut the picture -> 2.88 s kept
+                # Shorter narration pads with silence to retain the full 3.6-second source interval.
                 {"video_start": 1.2, "video_end": 4.8, "narration": "ဒုတိယ စာကြောင်း။"},
             ]}, ensure_ascii=False), encoding="utf-8")
             render_targets: list[float] = []
+            fit_targets: list[float] = []
+            padding_targets: list[float] = []
+            mux_padding_targets: list[float] = []
 
             class FakeEdgeEngine:
                 def __init__(self, *, ffmpeg, work_dir, rate, pitch, log):
@@ -109,12 +112,23 @@ class ShortPausesPipelineTests(unittest.TestCase):
                 try:
                     return wav_seconds(Path(path))  # the TTS clips are real WAVs
                 except (wave.Error, EOFError, OSError):
-                    return 9.0  # the fake joined voice / video files
+                    return 4.8  # the fake joined voice / video files
 
             def fake_render(_ffmpeg, _source, dst, _seg, target, _encoder, *_args, **_kwargs):
                 render_targets.append(round(float(target), 3))
                 Path(dst).write_bytes(b"v" * 6000)
                 return {"hybrid_used": 0.0, "applied_factor": 1.0}
+
+            def fake_pad(_ffmpeg, _ffprobe, part, target, duration):
+                if Path(target).name == "voice_mux_ready.wav":
+                    mux_padding_targets.append(round(float(duration), 3))
+                else:
+                    padding_targets.append(round(float(duration), 3))
+                return part, float(duration)
+
+            def fake_fit(_ffmpeg, _ffprobe, part, target, duration):
+                fit_targets.append(round(float(duration), 3))
+                return part, float(duration)
 
             runner = core.EdgeSmartSync(
                 job_dir=str(job), source_path=str(source), plan_path=str(plan_path),
@@ -125,26 +139,62 @@ class ShortPausesPipelineTests(unittest.TestCase):
                  mock.patch.object(core, "probe_duration", side_effect=probe), \
                  mock.patch.object(core, "concat_audio", side_effect=lambda _f, _p, out, _w: Path(out).write_bytes(b"a" * 2000)), \
                  mock.patch.object(core, "ffmpeg_encoders", return_value={"libx264"}), \
+                 mock.patch.object(core, "pad_audio_to_duration", side_effect=fake_pad), \
+                 mock.patch.object(core, "fit_audio_to_duration", side_effect=fake_fit), \
                  mock.patch.object(core, "render_video_part", side_effect=fake_render), \
                  mock.patch.object(core, "concat_video_parts", side_effect=lambda _f, _p, out, _w: Path(out).write_bytes(b"v" * 6000)), \
                  mock.patch.object(core, "apply_production_overlays", side_effect=lambda _f, video, *_args, **_kwargs: video), \
                  mock.patch.object(core, "mux_audio", side_effect=lambda _f, _v, _a, out, *_x: Path(out).write_bytes(b"m" * 6000)):
                 runner.run()
             plan = json.loads((job / "edge_tts_smart_sync" / "smart_sync_plan_edge_tts.json").read_text(encoding="utf-8"))
-            return render_targets, plan
+            return render_targets, fit_targets, padding_targets, mux_padding_targets, plan
 
-    def test_short_pauses_trim_each_line_and_the_picture_follows(self) -> None:
-        targets, plan = self._run(short_pauses=True)
+    def test_short_pauses_preserve_short_source_intervals_with_silence(self) -> None:
+        targets, fit_targets, padding_targets, mux_padding_targets, plan = self._run(short_pauses=True)
         self.assertEqual(len(targets), 2)
-        self.assertAlmostEqual(targets[0], 1.25, delta=0.02)
-        self.assertAlmostEqual(targets[1], 2.88, delta=0.01)  # not cut below window / 1.25
+        self.assertAlmostEqual(targets[0], 1.2, delta=0.01)
+        self.assertAlmostEqual(targets[1], 3.6, delta=0.01)
+        self.assertEqual(fit_targets, [1.2])
+        self.assertEqual(padding_targets, [3.6])
+        self.assertEqual(len(mux_padding_targets), 1)
+        self.assertAlmostEqual(mux_padding_targets[0], sum(targets) + 0.1, delta=0.01)
         timing = plan["tts_timing_segments"]
         self.assertAlmostEqual(timing[1]["audio_start"], timing[0]["audio_end"], delta=0.001)
         self.assertEqual([round(x["audio_end"] - x["audio_start"], 3) for x in timing], [round(t, 3) for t in targets])
+        self.assertAlmostEqual(plan["actual_audio_duration"], 4.8, delta=0.01)
 
-    def test_box_off_keeps_the_old_lengths(self) -> None:
-        targets, _plan = self._run(short_pauses=False)
-        self.assertEqual(targets, [2.0, 3.0])
+    def test_short_pauses_off_still_preserves_full_source_intervals(self) -> None:
+        targets, fit_targets, padding_targets, mux_padding_targets, _plan = self._run(short_pauses=False)
+        self.assertEqual(targets, [1.2, 3.6])
+        self.assertEqual(fit_targets, [1.2])
+        self.assertEqual(padding_targets, [3.6])
+        self.assertEqual(len(mux_padding_targets), 1)
+
+    def test_overlong_audio_uses_a_tempo_chain_and_is_limited_to_target_duration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+                source = Path(temp) / "overlong.wav"
+                target = Path(temp) / "fitted" / "overlong.wav"
+                completed = mock.Mock(returncode=0, stderr="")
+                with mock.patch.object(core, "probe_duration", side_effect=[4.5, 1.5]), \
+                     mock.patch.object(core.subprocess, "run", return_value=completed) as run:
+                    output, duration = core.fit_audio_to_duration(
+                        "/bin/true", "/bin/true", source, target, 1.5
+                    )
+
+        self.assertEqual(output, target)
+        self.assertAlmostEqual(duration, 1.5)
+        command = run.call_args.args[0]
+        self.assertIn("atempo=2.0,atempo=1.500000,apad", command[command.index("-af") + 1])
+        self.assertEqual(command[command.index("-t") + 1], "1.500000")
+
+
+class FullFootageSyncTests(unittest.TestCase):
+    def test_short_narration_never_speeds_up_or_trims_source_video(self) -> None:
+        vf, metrics = core._sync_filter(10.0, 4.0, max_video_speed=1.25)
+        self.assertIn("setpts=1.000000000*(PTS-STARTPTS)", vf)
+        self.assertNotIn("trim=duration=4.000000", vf)
+        self.assertEqual(metrics["target_duration"], 10.0)
+        self.assertEqual(metrics["applied_factor"], 1.0)
 
 
 if __name__ == "__main__":

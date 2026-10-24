@@ -54,12 +54,61 @@ class NotEnglishTests(unittest.TestCase):
         self.assertLess(share, rp.REPEAT_STOP_SHARE)
         self.assertEqual(count, len(ENGLISH))
 
+    def test_misaligned_repeated_whisper_tail_is_excluded_but_other_speech_continues(self):
+        segments = [
+            {"id": i, "start": i * 2.0, "end": i * 2.0 + 1.8, "text": text}
+            for i, text in enumerate(ENGLISH[:12])
+        ]
+        repeated_text = "I'm going to be a little bit more"
+        full_words = [
+            {"start": 100.0 + i * 0.1, "end": 100.1 + i * 0.1}
+            for i in range(9)
+        ]
+        segments.append({
+            "id": 12, "start": 100.0, "end": 101.0, "text": repeated_text, "words": full_words,
+        })
+        for segment_id in range(13, 18):
+            segments.append({
+                "id": segment_id,
+                "start": 101.0 + (segment_id - 13) * 0.5,
+                "end": 101.5 + (segment_id - 13) * 0.5,
+                "text": repeated_text,
+                "words": [{"start": 101.0, "end": 101.1}],
+            })
+        raw = {"backend": "faster-whisper", "segments": segments}
+
+        with self.assertRaisesRegex(RuntimeError, "heard little real speech"):
+            rp._check_heard_speech(raw, "whisper_transcript.txt")
+
+        cleaned, removed = rp._without_misaligned_repeated_segments(raw)
+        self.assertEqual(removed, {13, 14, 15, 16, 17})
+        self.assertEqual(len(cleaned["segments"]), 13)
+        rp._check_heard_speech(cleaned, "whisper_transcript.txt")
+
+    def test_repeated_whisper_lines_with_complete_word_alignment_are_preserved(self):
+        repeated_text = "Wait, wait, wait."
+        segments = [
+            {
+                "id": i,
+                "start": i * 2.0,
+                "end": i * 2.0 + 1.8,
+                "text": repeated_text,
+                "words": [{"start": i * 2.0, "end": i * 2.0 + 0.4} for _ in range(3)],
+            }
+            for i in range(3)
+        ]
+        cleaned, removed = rp._without_misaligned_repeated_segments({
+            "backend": "faster-whisper", "segments": segments,
+        })
+        self.assertEqual(removed, set())
+        self.assertEqual(len(cleaned["segments"]), 3)
+
     def test_a_very_short_transcript_is_not_judged(self):
         rp._check_heard_speech(transcript(["We are all here together."] * 6), "whisper_transcript.txt")
 
     def test_the_check_runs_before_the_translation(self):
         source = (APP / "recap_planner.py").read_text(encoding="utf-8")
-        self.assertLess(source.index("_check_heard_speech(transcript, transcript_text_file.name, language_name)"),
+        self.assertLess(source.index("_check_heard_speech(planning_transcript, transcript_text_file.name, language_name)"),
                         source.index("units = atomicize_timestamp_segments("))
 
 

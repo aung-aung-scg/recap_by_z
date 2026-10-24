@@ -103,8 +103,8 @@ Window ထိပ်က **Splitter** tab ကို နှိပ်ပါ။ ရ�
 ## Smart Sync ဘယ်လိုအလုပ်လုပ်လဲ
 
 - **ရုပ်ကို အပိုင်းခွဲ** — စာပိုင်းတိုင်းက မူရင်း video ရဲ့ ရုပ်တစ်ပိုင်းကို ပိုင်တယ်။ စာပိုင်း ၂ ခုကြားက အသံတိတ်နေရာကို အလယ်ကနေ ခွဲပြီး ဘေးက စာပိုင်း ၂ ခုကို ဝေပေးတယ်။ Video ရဲ့ ပထမ frame ကနေ နောက်ဆုံး frame အထိ ဘာမှ မကျန်ပါဘူး (V2 full coverage)။
-- **အရှည်ကို အသံနဲ့ ညှိ** — ရုပ်တစ်ပိုင်းစီကို မြန်မာအသံ အရှည်အတိုင်း ဖြစ်အောင် နှေးတာ / မြန်တာ (`setpts`) လုပ်တယ်။
-- **အမြန်ဆုံး ၁.၂၅ ဆ** — ရုပ်ကို ၁.၂၅ ဆထက် ပိုမမြန်စေဘူး (`max_video_speed`)။ အသံက ဒီထက်တိုနေသေးရင် အဲ့အပိုင်းရဲ့ နောက်ဆုံးက ရုပ်နည်းနည်းကို ဖြတ်တယ်။ အသံက ပိုရှည်ရင် ရုပ်ကို နှေးပေးတယ်။
+- **ရုပ်အပြည့် မဖြတ်ဘဲ ထိန်းထား** — စာပိုင်းတစ်ခုရဲ့ အသံက သူပိုင်တဲ့ မူရင်းရုပ်အပိုင်းထက် တိုရင် ရုပ်ကို မဖြတ်၊ မမြန်စေဘဲ မူရင်းအမြန်နှုန်းနဲ့ ဆက်ပြတယ်။ အသံတိုတဲ့နေရာမှာ အသံတိတ်ကို ဖြည့်ပြီး မူရင်း video အဆုံးအထိ ထိန်းထားတယ်။
+- **အသံရှည်ရင် ရုပ်ကို နှေး** — narration က မူရင်းရုပ်အပိုင်းထက် ရှည်မှသာ အဲဒီရုပ်အပိုင်းကို နှေး (သို့) freeze frame ဖြန့်ပြီး အသံနဲ့ကိုက်စေတယ်။ ဒီအခါ output က မူရင်းထက် ပိုရှည်နိုင်တယ်၊ မူရင်းရုပ်ကိုတော့ ဖြတ်မပစ်ဘူး။
 - **Frame ကို တွဲတွက်** — အပိုင်းတိုင်းရဲ့ frame အရေအတွက်ကို အသံရဲ့ စုစုပေါင်း အချိန်နဲ့ တွက်တယ် (30 fps)။ အပိုင်း ရာနဲ့ချီ ရှိနေတောင် ရုပ်နဲ့ အသံ frame တစ်ဝက်ထက် ပိုမကွာဘူး။ အဆုံးမှာ log က `SYNC OK: picture=… narration=… diff=…` လို့ ပြပါတယ်။
 - **ပုံစံ (Ratio / Fill)** — NVIDIA ရှိရင် NVENC၊ မရှိရင် libx264 နဲ့ ထုတ်တယ်။
 
@@ -242,10 +242,10 @@ videos into parts.
 5. **Voice** — Microsoft Edge TTS Myanmar voices (Thiha / Nilar). "Short pauses" trims the silence
    Edge puts around each clip (~0.25 s between lines instead of ~1 s).
 6. **Smart Sync** — every unit owns a window of the original picture (the silence between two units
-   is split at its middle, so the whole video is used). Each window is slowed down or sped up to the
-   length of its Myanmar voice; it never plays faster than 1.25× (`max_video_speed`), and when the
-   voice is shorter still the end of that window is cut. Frame counts are cumulative at 30 fps, so
-   even hundreds of parts stay within half a frame of the voice (`SYNC OK … diff=…` in the log).
+   is split at its middle, so the whole video is used). If its Myanmar voice is shorter than that
+   window, silence fills the remainder; if longer, the voice is sped up to fit. Every original
+   picture interval is retained and the output stays the same duration as the source. Frame counts
+   are cumulative at 30 fps; `SYNC OK … diff=…` compares picture and narration duration.
    Output ratio **16:9** (1920×1080), **9:16** (1080×1920), **1:1** (1080×1080) or **Original**
    (the source shape, long side at most 1920); when the source has another shape, **Fill** decides:
    Blur background, Black bars or Crop to fill. Optional zoom/flip; NVENC or libx264.
@@ -282,13 +282,13 @@ requests" line is only a warning. If huggingface.co does not open, use a VPN or 
 
 ### Use
 Double-click **`RUN.bat`**:
-- **Source Video** → Browse (or **Folder** for a batch; finished videos are skipped).
+- **Source Video** → Browse, or drop a video on the empty preview (use **Folder...** for a batch; finished videos are skipped).
 - **Save final to** — when a folder is chosen, each finished video is also saved there as
   `<video name>_Myanmar.mp4`.
 - **Source language** (Auto-detect, English, Chinese, Hindi, …), **Edge TTS Voice / Speed** on the left.
 - **Preview** in the middle: seek, Refresh Frame, drag the title/logo/text, draw blur boxes.
-- **Production Tools** on the right: Zoom, Flip, Voice vol, Short pauses, Ratio + Fill, blur,
-  title, logo, extra text.
+- **Editing Inspector** on the right: use the accordion sections for Playback, Blur Watermark Area,
+  Title, Logo and Extra Text Box.
 - **START / RESUME** — starts or continues; **STOP SAFELY** — stops at a safe point and keeps
   everything; **Open Job Folder**; **Edit Text** — read each English line next to its Burmese narration,
   fix the Burmese and Save; START / RESUME then re-voices only the edited lines. When a line gets no
@@ -299,6 +299,11 @@ Double-click **`RUN.bat`**:
 - When Whisper listens for the wrong language it writes a few phrases again and again ("I'm not going to do
   it." ×40); when a quarter of the Whisper lines repeat, the job stops before translating (no Gemini quota
   used) — choose the right Source language (or Auto-detect) and start again.
+- On long videos, an unusually short transcript is retried without VAD. If the two passes corroborate a short
+  low-dialogue transcript, it is kept; if they disagree or the retry cannot confirm it, the job stops for
+  transcript review instead of producing a potentially incomplete recap. The render also blocks a sub-6-second
+  narration from an unverified long-source transcript. Check `whisper_transcript.txt`, the source audio, and
+  Source language before retrying.
 - Gemini `User location is not supported for the API use`: Gemini refuses the country of your internet /
   VPN server — change the VPN server and START / RESUME.
 

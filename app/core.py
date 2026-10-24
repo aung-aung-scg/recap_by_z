@@ -482,8 +482,7 @@ def trim_edge_silence(
     """Short pauses: cut the silence Edge TTS puts before (~0.2 s) and after (~0.8 s) each clip.
 
     Joined clips then pause keep_lead + keep_tail (~0.25 s, like a sentence break) instead of ~1 s.
-    A clip is never made shorter than min_duration: below source window / max_video_speed Smart
-    Sync would have to cut the picture, so there a longer pause is kept. Pauses inside the clip
+    If requested, a clip is never made shorter than min_duration. Pauses inside the clip
     are untouched and the source WAV (the TTS cache) is never changed.
     Returns (file to use, its duration).
     """
@@ -549,6 +548,69 @@ def concat_audio(ffmpeg: str, parts: list[Path], output: Path, work_dir: Path) -
         raise RuntimeError(f"Audio concat failed:\n{result.stderr[-4000:]}")
 
 
+def pad_audio_to_duration(
+    ffmpeg: str, ffprobe: str, source: Path, target: Path, duration: float,
+) -> tuple[Path, float]:
+    """Append silence when narration is shorter than its source-video interval."""
+    source_duration = probe_duration(ffprobe, source)
+    target_duration = max(float(duration), source_duration)
+    if target_duration <= source_duration + 0.001:
+        return source, source_duration
+    target.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(source),
+        "-af", "apad", "-t", f"{target_duration:.6f}", "-ar", "48000", "-ac", "2",
+        "-c:a", "pcm_s16le", str(target),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        raise RuntimeError(f"Audio silence padding failed:\n{result.stderr[-4000:]}")
+    actual_duration = probe_duration(ffprobe, target)
+    if actual_duration + 0.05 < target_duration:
+        raise RuntimeError(
+            f"Audio silence padding incomplete: expected {target_duration:.3f}s, got {actual_duration:.3f}s"
+        )
+    return target, actual_duration
+
+
+def fit_audio_to_duration(
+    ffmpeg: str, ffprobe: str, source: Path, target: Path, duration: float,
+) -> tuple[Path, float]:
+    """Fit narration to its source-video interval, padding or speeding up audio as needed."""
+    target_duration = float(duration)
+    if target_duration <= 0.0:
+        raise ValueError(f"Audio target duration must be positive, got {target_duration:.6f}s")
+
+    source_duration = probe_duration(ffprobe, source)
+    if source_duration < target_duration:
+        return pad_audio_to_duration(ffmpeg, ffprobe, source, target, target_duration)
+    if source_duration <= target_duration + 0.001:
+        return source, source_duration
+
+    tempo = source_duration / target_duration
+    filters: list[str] = []
+    while tempo > 2.0:
+        filters.append("atempo=2.0")
+        tempo /= 2.0
+    filters.extend((f"atempo={tempo:.6f}", "apad"))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(source),
+        "-af", ",".join(filters), "-t", f"{target_duration:.6f}",
+        "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", str(target),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        raise RuntimeError(f"Audio duration fit failed:\n{result.stderr[-4000:]}")
+
+    actual_duration = probe_duration(ffprobe, target)
+    if actual_duration + 0.05 < target_duration or actual_duration > target_duration + 0.05:
+        raise RuntimeError(
+            f"Audio duration fit failed: expected {target_duration:.3f}s, got {actual_duration:.3f}s"
+        )
+    return target, actual_duration
+
+
 def _sync_filter(
     source_duration: float,
     target_duration: float,
@@ -558,39 +620,20 @@ def _sync_filter(
     smooth_freeze_fallback: bool = False,
     max_freeze_hold: float = 0.75,
 ) -> tuple[str, dict[str, float]]:
-    """Recap-style hybrid timing plan for one timestamp segment.
+    """Create a video interval at least as long as its source footage.
 
-    - Normal case: exact setpts to the actual TTS duration.
-    - Audio much shorter: cap speed-up at max_video_speed, then trim.
-    - Audio much longer: cap slow-down at max_video_slow.  When the requested
+    - Shorter narration leaves the source video at normal speed.
+    - Longer narration slows the video to match. When the requested
       stretch exceeds that visual limit, the caller may distribute short
       freeze holds across the segment instead of making motion unnaturally slow.
     """
     if source_duration <= 0.01 or target_duration <= 0.01:
         raise ValueError("Smart Sync duration invalid")
-    max_speed = max(1.0, float(max_video_speed))
     max_slow = max(1.0, float(max_video_slow))
+    target_duration = max(float(source_duration), float(target_duration))
     desired = target_duration / source_duration
-    min_factor = 1.0 / max_speed
-
-    if desired < min_factor:
-        applied = min_factor
-        adjusted = source_duration * applied
-        return (
-            f"trim=duration={source_duration:.6f},setpts={applied:.9f}*(PTS-STARTPTS),trim=duration={target_duration:.6f},setpts=PTS-STARTPTS,fps=30",
-            {
-                "desired_factor": desired,
-                "applied_factor": applied,
-                "source_duration": source_duration,
-                "target_duration": target_duration,
-                "freeze_duration": 0.0,
-                "freeze_count": 0.0,
-                "hybrid_used": 0.0,
-            },
-        )
 
     if desired <= max_slow or not smooth_freeze_fallback:
-        # With fallback disabled this deliberately behaves like V0.2.4 exact sync.
         applied = desired
         return (
             f"trim=duration={source_duration:.6f},setpts={applied:.9f}*(PTS-STARTPTS),fps=30",
@@ -691,7 +734,7 @@ def _visual_filters(mirror_video: bool, zoom_factor: float,
     Crop fills the frame and cuts overflow. Blur / black keep the picture centred, with a
     blurred copy or black bars in the free room. Zoom below 1.0 insets the picture.
     """
-    zoom = max(1.0, min(float(zoom_factor), 1.25))
+    zoom = max(0.80, min(float(zoom_factor), 1.25))
     lay = layout or {"fill": "crop", "cw": 1920, "ch": 1080, "sw": 0, "sh": 0}
     cw, ch = int(lay["cw"]), int(lay["ch"])
     sw, sh = int(lay.get("sw") or 0) or cw, int(lay.get("sh") or 0) or ch
@@ -821,8 +864,8 @@ def render_video_part(
     """frame_count (when given) locks the part to exactly that many 30 fps frames.
     layout (frame_layout) is the output ratio / fill; None = the original 16:9 fill.
 
-    Without it each part rounds up to the next whole frame; over ~270 parts that
-    added ~6 s, so the picture drifted behind the narration and -shortest cut the end.
+    Without it each part rounds up to the next whole frame; over many parts,
+    rounding can cause visible drift against the audio timeline.
     """
     source_duration = float(seg["video_end"]) - float(seg["video_start"])
     frame_lock = ["-frames:v", str(int(frame_count))] if frame_count and frame_count > 0 else []
@@ -1179,6 +1222,56 @@ def make_paths(job_dir: Path) -> PipelinePaths:
     )
 
 
+def validate_recap_audio_coverage(plan: dict[str, Any], narration_duration: float) -> None:
+    """Block very short narration for a long source when sparse speech was not corroborated."""
+    try:
+        source_duration = float(plan.get("source_duration") or 0.0)
+    except (TypeError, ValueError):
+        return
+    if source_duration < 60.0 or narration_duration >= 6.0:
+        return
+
+    validation = plan.get("transcript_validation") or {}
+    if validation.get("status") in {"sparse_recovered", "sparse_corroborated"}:
+        return
+
+    segments = [seg for seg in plan.get("segments") or [] if isinstance(seg, dict)]
+    source_text = " ".join(str(seg.get("source_text") or "") for seg in segments)
+    word_count = sum(1 for word in source_text.split() if any(char.isalnum() for char in word))
+    text_characters = sum(char.isalnum() for char in source_text)
+    speech_seconds = 0.0
+    for segment in segments:
+        try:
+            start = float(segment["gemini_start"])
+            end = float(segment["gemini_end"])
+        except (KeyError, TypeError, ValueError):
+            speech_seconds = 0.0
+            break
+        if end > start:
+            speech_seconds += end - start
+
+    if word_count < 8 and text_characters < 32 and speech_seconds < 3.0:
+        raise RuntimeError(
+            "RECAP_DURATION_VALIDATION_FAILED: narration is only "
+            f"{narration_duration:.2f}s for a {source_duration:.2f}s source, based on "
+            f"{word_count} transcript words across {speech_seconds:.2f}s of timestamped speech. "
+            "Video rendering was stopped because transcript completeness is unverified. Inspect "
+            "whisper_transcript.txt and the source audio, confirm the source-language setting, then retry. "
+            "If this is genuinely a low-dialogue video, rerun with current Whisper validation so the sparse "
+            "transcript can be corroborated."
+        )
+
+
+def validate_final_mux_duration(audio_duration: float, final_duration: float) -> None:
+    tolerance = max(0.25, audio_duration * 0.01)
+    if audio_duration > 0.0 and abs(final_duration - audio_duration) > tolerance:
+        raise RuntimeError(
+            "FINAL_DURATION_VALIDATION_FAILED: final video duration "
+            f"{final_duration:.2f}s does not match mux audio {audio_duration:.2f}s "
+            f"(allowed difference {tolerance:.2f}s). The output is not marked successful."
+        )
+
+
 class EdgeSmartSync:
     def __init__(
         self,
@@ -1244,24 +1337,22 @@ class EdgeSmartSync:
     def _log_sync_check(self, paths: "PipelinePaths", segments: list[dict[str, Any]], checkpoint: dict[str, Any]) -> None:
         """Automatic, language-independent sync report written to the run log.
 
-        Narration is the clock; every video part is frame-locked to it. So if the
-        concatenated picture and the narration track have the same length, every
-        segment starts on its own narration line. Speed-capped/trimmed segments are
-        listed only for information: trimming shortens footage, not the timeline.
+        Each output part retains its full source interval and may be extended to
+        match narration. The report compares the resulting picture and audio tracks.
         """
         try:
             video_len = probe_duration(self.ffprobe, paths.synced_video_noaudio)
             audio_len = probe_duration(self.ffprobe, paths.voice)
             diff = video_len - audio_len
-            trimmed = 0
+            extended = 0
             for seg in segments:
                 sync = ((checkpoint.get("video") or {}).get(segment_basename(seg)) or {}).get("sync") or {}
-                if float(sync.get("applied_factor", 0.0) or 0.0) > float(sync.get("desired_factor", 0.0) or 0.0) + 1e-6:
-                    trimmed += 1
+                if float(sync.get("target_duration", 0.0) or 0.0) > float(sync.get("source_duration", 0.0) or 0.0) + 1e-6:
+                    extended += 1
             status = "✅ SYNC OK" if abs(diff) <= 0.1 else "⚠️ SYNC DRIFT"
             self.log(
                 f"{status}: picture={video_len:.2f}s · narration={audio_len:.2f}s · diff={diff:+.3f}s "
-                f"| {len(segments)} segments, {trimmed} speed-capped ({self.max_video_speed:g}x) + footage trimmed"
+                f"| {len(segments)} segments, {extended} extended to narration length; source footage not trimmed"
             )
         except Exception as exc:
             self.log(f"⚠️ Sync check skipped: {exc}")
@@ -1313,6 +1404,9 @@ class EdgeSmartSync:
         cursor = 0.0
         short_pauses = bool(self.short_pauses)
         tts_total = 0.0
+        narration_content_duration = 0.0
+        pending_audio_padding: list[tuple[int, Path, Path, float]] = []
+        fitted_audio_parts = 0
 
         # AUDIO: timestamp segment = master save unit. The user's engine may split
         # sentences internally, but only one deterministic WAV is kept per timestamp segment.
@@ -1370,9 +1464,27 @@ class EdgeSmartSync:
             part = dst
             tts_total += duration
             if short_pauses:
-                window = float(seg["video_end"]) - float(seg["video_start"])
                 part, duration = trim_edge_silence(dst, paths.tts_parts.parent / "tts_parts_short" / dst.name,
-                                                   min_duration=window / self.max_video_speed)
+                                                   min_duration=0.0)
+            narration_content_duration += duration
+            window = max(0.0, float(seg["video_end"]) - float(seg["video_start"]))
+            if duration > window + 0.001:
+                part, duration = fit_audio_to_duration(
+                    self.ffmpeg,
+                    self.ffprobe,
+                    part,
+                    paths.tts_parts.parent / "tts_parts_fitted" / dst.name,
+                    window,
+                )
+                fitted_audio_parts += 1
+            elif duration < window:
+                pending_audio_padding.append((
+                    len(audio_parts),
+                    part,
+                    paths.tts_parts.parent / "tts_parts_padded" / dst.name,
+                    window,
+                ))
+                duration = window
             start = cursor
             end = cursor + duration
             timing.append({
@@ -1391,9 +1503,29 @@ class EdgeSmartSync:
             audio_parts.append(part)
             self.progress(idx, len(segments), f"Audio {idx}/{len(segments)}")
 
+        validate_recap_audio_coverage(plan, narration_content_duration)
+        for part_index, source_part, target_part, target_duration in pending_audio_padding:
+            padded_part, _padded_duration = pad_audio_to_duration(
+                self.ffmpeg,
+                self.ffprobe,
+                source_part,
+                target_part,
+                target_duration,
+            )
+            audio_parts[part_index] = padded_part
+            timing[part_index]["audio_file"] = str(padded_part)
         if short_pauses:
-            self.log(f"✂️ Short pauses: Edge TTS silence trimmed · voice {tts_total / 60:.1f} → {cursor / 60:.1f} min "
-                     f"(~0.25 s between lines; picture never cut for it)")
+            self.log(
+                f"✂️ Short pauses: Edge TTS silence trimmed; narration fitted to the full source timeline "
+                f"(raw TTS {tts_total / 60:.1f} min · narration {narration_content_duration / 60:.1f} min · "
+                f"timeline {cursor / 60:.1f} min · sped-up parts {fitted_audio_parts})"
+            )
+        else:
+            self.log(
+                f"🔇 Narration fitted to the full source timeline "
+                f"(narration {narration_content_duration / 60:.1f} min · timeline {cursor / 60:.1f} min · "
+                f"sped-up parts {fitted_audio_parts})"
+            )
         self.log("🔗 Timestamp audio parts concat...")
         concat_audio(self.ffmpeg, audio_parts, paths.voice, paths.work)
         final_audio_duration = probe_duration(self.ffprobe, paths.voice)
@@ -1436,8 +1568,7 @@ class EdgeSmartSync:
         remembered = str(checkpoint.get("selected_encoder") or "")
         encoder = remembered if remembered in {"h264_nvenc", "libx264"} else preferred
         video_parts: list[Path] = []
-        # Cumulative frame lock: each part gets round(audio_end*30) - frames_so_far
-        # frames, so video never drifts more than half a frame from the narration.
+        # Cumulative frame lock keeps each rendered interval aligned to the source timeline.
         audio_cursor = 0.0
         frames_done = 0
 
@@ -1446,7 +1577,7 @@ class EdgeSmartSync:
                 raise InterruptedError("STOP requested — video parts checkpoint ထဲကနေ Resume လုပ်နိုင်ပါတယ်။")
             base = segment_basename(seg)
             dst = paths.video_parts / f"{base}.mp4"
-            target = float(item["audio_duration"])
+            target = max(0.0, float(seg["video_end"]) - float(seg["video_start"]))
             audio_cursor += target
             frame_count = max(1, int(round(audio_cursor * 30)) - frames_done)
             frames_done += frame_count
@@ -1539,12 +1670,43 @@ class EdgeSmartSync:
                 source_size=(layout["sw"], layout["sh"]),
                 fill=layout["fill"],
             )
+        try:
+            source_duration = float(plan.get("source_duration") or 0.0)
+        except (TypeError, ValueError):
+            source_duration = 0.0
+        if source_duration <= 0.0:
+            source_duration = sum(
+                max(0.0, float(seg["video_end"]) - float(seg["video_start"]))
+                for seg in segments
+            )
+        rendered_video_duration = probe_duration(self.ffprobe, video_for_mux)
+        if abs(rendered_video_duration - source_duration) > (1.0 / 30.0):
+            raise RuntimeError(
+                "SOURCE_FOOTAGE_DURATION_VALIDATION_FAILED: rendered video is "
+                f"{rendered_video_duration:.3f}s; expected the full source duration "
+                f"of {source_duration:.3f}s. "
+                "The final video was not muxed."
+            )
         self.log("🎧 Edge TTS audio mux...")
         volume_percent = int(getattr(self, "voice_volume_percent", 100) or 100)
         if volume_percent != 100:
             self.log(f"🔊 Voice volume {volume_percent}% applied at final mux (limiter on)")
-        mux_audio(self.ffmpeg, video_for_mux, paths.voice, paths.final, volume_percent)
+        mux_audio_path, mux_audio_duration = pad_audio_to_duration(
+            self.ffmpeg,
+            self.ffprobe,
+            paths.voice,
+            paths.work / "voice_mux_ready.wav",
+            max(final_audio_duration, round(cursor * 30) / 30.0) + 0.1,
+        )
+        mux_audio(self.ffmpeg, video_for_mux, mux_audio_path, paths.final, volume_percent)
         final_duration = probe_duration(self.ffprobe, paths.final)
+        if abs(final_duration - source_duration) > (1.0 / 30.0):
+            raise RuntimeError(
+                "FINAL_SOURCE_DURATION_VALIDATION_FAILED: final video is "
+                f"{final_duration:.3f}s; expected the full source duration "
+                f"of {source_duration:.3f}s."
+            )
+        validate_final_mux_duration(mux_audio_duration, final_duration)
         self.log(f"✅ FINAL READY: {paths.final}")
         self.log(f"⏱️ Final duration: {final_duration:.2f}s")
         return {

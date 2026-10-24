@@ -16,6 +16,12 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+except ImportError:
+    DND_FILES = None
+    TkinterDnD = None
+
 from core import FRAME_FILLS, OUTPUT_RATIOS, normalize_segments, output_canvas, probe_video_size
 from preview_tools import probe_duration as preview_probe_duration, extract_preview_frame, scale_logo_preview
 from narration_editor import NarrationEditor, failed_segment_from_error
@@ -30,16 +36,63 @@ JOBS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 EVENT_PREFIX = "@@VRS_EVENT@@"
 
-BG = "#0d0f14"
-PANEL = "#151922"
-FIELD = "#0a0c10"
-BORDER = "#303744"
-FG = "#e7eaf0"
-MUTED = "#9da7b6"
-ACCENT = "#5b8cff"
-ACCENT_HOVER = "#739dff"
-DANGER = "#ff6b6b"
-SUCCESS = "#55d187"
+BG = "#0D1117"
+PANEL = "#161B22"
+FIELD = "#0B0F14"
+BORDER = "#30363D"
+FG = "#F3F4F6"
+MUTED = "#9CA3AF"
+ACCENT = "#38BDF8"
+ACCENT_HOVER = "#0EA5E9"
+DANGER = "#EF4444"
+WARNING = "#F59E0B"
+SUCCESS = "#22C55E"
+THEME_PALETTES = {
+    "Dark": {
+        "bg": BG,
+        "panel": PANEL,
+        "field": "#202632",
+        "border": BORDER,
+        "fg": FG,
+        "muted": MUTED,
+        "accent": ACCENT,
+        "accent_hover": ACCENT_HOVER,
+        "button": "#202632",
+        "button_hover": "#2B3441",
+        "danger": "#3B1F24",
+        "danger_fg": "#FCA5A5",
+        "error": DANGER,
+        "warning": WARNING,
+        "success": SUCCESS,
+        "canvas": "#080B10",
+        "text": "#0B0F14",
+        "log_fg": FG,
+        "selection": "#164E63",
+        "disabled": "#6B7280",
+    },
+    "Light": {
+        "bg": "#f3f5f8",
+        "panel": "#e6eaf0",
+        "field": "#ffffff",
+        "border": "#b8c1ce",
+        "fg": "#202733",
+        "muted": "#5d6878",
+        "accent": "#356bd8",
+        "accent_hover": "#2458bf",
+        "button": "#e1e6ed",
+        "button_hover": "#d2dbe7",
+        "danger": "#f6dfe1",
+        "danger_fg": "#772c35",
+        "error": "#B42318",
+        "warning": "#9A6700",
+        "success": "#237447",
+        "canvas": "#dfe4eb",
+        "text": "#f8f9fb",
+        "log_fg": "#303946",
+        "selection": "#b8d0fa",
+        "disabled": "#8792a0",
+    },
+}
 PREVIEW_W = 640
 PREVIEW_H = 360
 
@@ -123,7 +176,57 @@ def _native_crash_message(code: int) -> str:
     return f"Child process closed with exit code {code}. run.log ကိုစစ်ပါ။"
 
 
-class App(tk.Tk):
+class ToolTip:
+    def __init__(self, widget: tk.Misc, textvariable: tk.StringVar, palette: dict[str, str]) -> None:
+        self.widget = widget
+        self.textvariable = textvariable
+        self.palette = palette
+        self._timer: str | None = None
+        self._window: tk.Toplevel | None = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<FocusIn>", self._schedule, add="+")
+        widget.bind("<FocusOut>", self._hide, add="+")
+
+    def set_palette(self, palette: dict[str, str]) -> None:
+        self.palette = palette
+
+    def _schedule(self, _event=None) -> None:
+        self._cancel()
+        self._timer = self.widget.after(500, self._show)
+
+    def _cancel(self) -> None:
+        if self._timer is not None:
+            self.widget.after_cancel(self._timer)
+            self._timer = None
+
+    def _show(self) -> None:
+        self._timer = None
+        text = self.textvariable.get().strip()
+        if not text or self._window is not None:
+            return
+        window = tk.Toplevel(self.widget)
+        window.wm_overrideredirect(True)
+        window.configure(bg=self.palette["border"])
+        label = ttk.Label(
+            window, text=text, style="Tooltip.TLabel", wraplength=640, justify="left",
+            padding=(8, 5),
+        )
+        label.pack(padx=1, pady=1)
+        window.update_idletasks()
+        x = self.widget.winfo_rootx()
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        window.geometry(f"+{x}+{y}")
+        self._window = window
+
+    def _hide(self, _event=None) -> None:
+        self._cancel()
+        if self._window is not None:
+            self._window.destroy()
+            self._window = None
+
+
+class App(TkinterDnD.Tk if TkinterDnD is not None else tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Recap → Myanmar — Narrator · Edge TTS · Smart Sync  |  Splitter")
@@ -133,9 +236,14 @@ class App(tk.Tk):
             self.state("zoomed")  # start maximised so all three panes get real space
         except tk.TclError:
             pass
-        self.configure(bg=BG)
         self.cfg = load_config()
+        saved_theme = str(self.cfg.get("theme") or "Dark")
+        self.theme_name = saved_theme if saved_theme in THEME_PALETTES else "Dark"
+        self.palette = THEME_PALETTES[self.theme_name]
+        self.theme_var = tk.StringVar(value=self.theme_name)
+        self.configure(bg=self.palette["bg"])
         self.msgq: queue.Queue[tuple[str, object]] = queue.Queue()
+        self._tooltips: list[ToolTip] = []
         self.stop_event = threading.Event()
         self.worker: threading.Thread | None = None
         self.current_proc: subprocess.Popen | None = None
@@ -145,6 +253,7 @@ class App(tk.Tk):
 
         self.gemini_env = tk.StringVar(value=self.cfg.get("gemini_env_path") or str(ROOT_DIR / ".env"))
         self.source = tk.StringVar(value="")
+        self._loaded_source_path: Path | None = None
         self.source_title = tk.StringVar(value="")
         saved_language = str(self.cfg.get("source_language") or "auto")
         self.source_language = tk.StringVar(value=LANGUAGE_LABELS.get(saved_language, LANGUAGE_LABELS["auto"]))
@@ -159,6 +268,7 @@ class App(tk.Tk):
         self.voice_volume = tk.IntVar(value=int(self.cfg.get("voice_volume_percent", 100) or 100))
         self.short_pauses = tk.BooleanVar(value=bool(self.cfg.get("short_pauses", True)))
         self.zoom_factor = tk.DoubleVar(value=float(self.cfg.get("zoom_factor", 1.05)))
+        self.zoom_percent = tk.StringVar(value=f"{float(self.zoom_factor.get()) * 100:.0f}")
         saved_ratio = str(self.cfg.get("output_ratio") or "16:9")
         self.output_ratio = tk.StringVar(value=saved_ratio if saved_ratio in OUTPUT_RATIOS else "16:9")
         self.frame_fill = tk.StringVar(value=FILL_LABELS.get(str(self.cfg.get("frame_fill") or "blur"), FILL_LABELS["blur"]))
@@ -170,6 +280,8 @@ class App(tk.Tk):
         self.status = tk.StringVar(value="READY")
         self.stage = tk.StringVar(value="Idle")
         self.job_display = tk.StringVar(value="Job output: not selected")
+        self.progress_percent = tk.StringVar(value="0%")
+        self.run_logs_expanded = tk.BooleanVar(value=False)
         # Folder batch: when non-empty, START processes these files one by one.
         self.batch_files: list[Path] = []
         self.batch_folder: Path | None = None
@@ -201,176 +313,510 @@ class App(tk.Tk):
         self._drag_start: tuple[float, float] | None = None
         self._drag_original = None
 
-        self._apply_dark_theme()
+        self._apply_theme_styles()
         self._build()
+        self._apply_theme_styles()
+        self._apply_theme_widgets()
         self.after(150, self._pump)
 
-    def _apply_dark_theme(self) -> None:
+    def _apply_theme_styles(self) -> None:
+        palette = self.palette
+        bg, panel = palette["bg"], palette["panel"]
+        field, border = palette["field"], palette["border"]
+        fg, muted = palette["fg"], palette["muted"]
+        accent = palette["accent"]
         style = ttk.Style(self)
         try:
             style.theme_use("clam")
         except tk.TclError:
             pass
-        style.configure(".", background=BG, foreground=FG, font=("Segoe UI", 10))
-        style.configure("TFrame", background=BG)
-        style.configure("Panel.TFrame", background=PANEL)
-        style.configure("TLabel", background=BG, foreground=FG)
-        style.configure("Muted.TLabel", background=BG, foreground=MUTED)
-        style.configure("Status.TLabel", background=BG, foreground=SUCCESS, font=("Segoe UI Semibold", 10))
-        style.configure("TLabelframe", background=BG, foreground=FG, bordercolor=BORDER, relief="solid")
-        style.configure("TLabelframe.Label", background=BG, foreground=FG, font=("Segoe UI Semibold", 10))
-        style.configure("TEntry", fieldbackground=FIELD, foreground=FG, insertcolor=FG, bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER)
-        style.map("TEntry", fieldbackground=[("disabled", PANEL)], foreground=[("disabled", MUTED)])
-        style.configure("TCombobox", fieldbackground=FIELD, foreground=FG, background=PANEL, arrowcolor=FG, bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER)
-        style.map("TCombobox", fieldbackground=[("readonly", FIELD)], foreground=[("readonly", FG)], selectbackground=[("readonly", FIELD)], selectforeground=[("readonly", FG)])
-        style.configure("TButton", background="#252b36", foreground=FG, bordercolor=BORDER, padding=(10, 6))
-        style.map("TButton", background=[("active", "#333b49"), ("disabled", PANEL)], foreground=[("disabled", "#657080")])
-        style.configure("Compact.TButton", background="#252b36", foreground=FG, bordercolor=BORDER, padding=(6, 2))
-        style.map("Compact.TButton", background=[("active", "#333b49"), ("disabled", PANEL)], foreground=[("disabled", "#657080")])
-        style.configure("Accent.TButton", background=ACCENT, foreground="#ffffff", bordercolor=ACCENT, padding=(12, 7), font=("Segoe UI Semibold", 10))
-        style.map("Accent.TButton", background=[("active", ACCENT_HOVER), ("disabled", "#33445f")], foreground=[("disabled", "#8892a0")])
-        style.configure("Danger.TButton", background="#4a252a", foreground="#ffd9dc", bordercolor="#6a3038", padding=(10, 6))
-        style.map("Danger.TButton", background=[("active", "#653039")])
-        style.configure("TCheckbutton", background=BG, foreground=FG)
-        style.map("TCheckbutton", background=[("active", BG)], foreground=[("active", FG)])
-        style.configure("Horizontal.TProgressbar", troughcolor=FIELD, background=ACCENT, bordercolor=FIELD, lightcolor=ACCENT, darkcolor=ACCENT)
-        style.configure("TNotebook", background=BG, borderwidth=0)
-        style.configure("TNotebook.Tab", background=PANEL, foreground=MUTED, padding=(14, 5), bordercolor=BORDER)
-        style.map("TNotebook.Tab", background=[("selected", "#252b36")], foreground=[("selected", FG)])
-        style.configure("Tools.TNotebook.Tab", font=("Segoe UI Semibold", 11), padding=(22, 7))
-        self.option_add("*TCombobox*Listbox.background", FIELD)
-        self.option_add("*TCombobox*Listbox.foreground", FG)
-        self.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
+        style.configure(".", background=bg, foreground=fg, font=("Segoe UI", 10))
+        style.configure("TFrame", background=panel)
+        style.configure("Page.TFrame", background=bg)
+        style.configure("Panel.TFrame", background=panel)
+        style.configure("Inset.TFrame", background=field)
+        style.configure("Header.TFrame", background=panel)
+        style.configure("TLabel", background=panel, foreground=fg)
+        style.configure("Page.TLabel", background=bg, foreground=fg)
+        style.configure("Panel.TLabel", background=panel, foreground=fg)
+        style.configure("Inset.TLabel", background=field, foreground=fg)
+        style.configure("Muted.TLabel", background=panel, foreground=muted, font=("Segoe UI", 10))
+        style.configure("PanelMuted.TLabel", background=panel, foreground=muted, font=("Segoe UI", 10))
+        style.configure("Section.TLabel", background=panel, foreground=accent,
+                        font=("Segoe UI Semibold", 11), padding=(0, 2))
+        style.configure("PanelSection.TLabel", background=panel, foreground=accent,
+                        font=("Segoe UI Semibold", 11), padding=(0, 2))
+        style.configure("Title.TLabel", background=panel, foreground=fg,
+                        font=("Segoe UI Semibold", 17))
+        style.configure("Subtitle.TLabel", background=panel, foreground=muted, font=("Segoe UI", 10))
+        style.configure("Tooltip.TLabel", background=panel, foreground=fg,
+                        borderwidth=0, font=("Segoe UI", 9))
+        style.configure("Status.TLabel", background=panel, foreground=palette["success"],
+                        font=("Segoe UI Semibold", 10), padding=(8, 3))
+        style.configure("ProductionStatus.TLabel", background=panel, foreground=palette["success"],
+                        font=("Segoe UI Semibold", 10), padding=(8, 3))
+        style.configure("TLabelframe", background=panel, foreground=fg, bordercolor=border,
+                        relief="solid", padding=8)
+        style.configure("TLabelframe.Label", background=panel, foreground=muted,
+                        font=("Segoe UI Semibold", 9), padding=(4, 0))
+        style.configure("Card.TLabelframe", background=panel, foreground=fg,
+                        bordercolor=border, relief="solid", padding=8)
+        style.configure("Card.TLabelframe.Label", background=panel, foreground=accent,
+                        font=("Segoe UI Semibold", 9), padding=(4, 0))
+        style.configure("TEntry", fieldbackground=field, foreground=fg, insertcolor=fg,
+                        bordercolor=border, lightcolor=border, darkcolor=border, padding=(7, 5))
+        style.configure("Required.TEntry", fieldbackground=field, foreground=fg, insertcolor=fg,
+                        bordercolor=palette["warning"], lightcolor=palette["warning"],
+                        darkcolor=palette["warning"], padding=(7, 5))
+        style.map("TEntry", fieldbackground=[("disabled", panel), ("focus", field)],
+                  foreground=[("disabled", muted)], bordercolor=[("focus", accent)])
+        style.configure("TCombobox", fieldbackground=field, foreground=fg, background=field,
+                        arrowcolor=muted, bordercolor=border, lightcolor=border, darkcolor=border,
+                        padding=(7, 5), arrowsize=12)
+        style.map("TCombobox", fieldbackground=[("readonly", field), ("focus", field)],
+                  foreground=[("readonly", fg)], selectbackground=[("readonly", field)],
+                  selectforeground=[("readonly", fg)], bordercolor=[("focus", accent)],
+                  arrowcolor=[("active", accent), ("disabled", muted)])
+        style.configure("TButton", background=palette["button"], foreground=fg,
+                        bordercolor=border, focusthickness=1, focuscolor=accent,
+                        padding=(10, 6), relief="flat")
+        style.map("TButton", background=[("pressed", palette["button_hover"]),
+                                        ("active", palette["button_hover"]), ("disabled", panel)],
+                  foreground=[("disabled", palette["disabled"])], bordercolor=[("focus", accent)])
+        style.configure("Action.TButton", background=palette["button"], foreground=fg,
+                        bordercolor=border, focusthickness=1, focuscolor=accent,
+                        padding=(9, 6), relief="flat")
+        style.map("Action.TButton", background=[("pressed", palette["button_hover"]),
+                                               ("active", palette["button_hover"]), ("disabled", panel)],
+                  foreground=[("disabled", palette["disabled"])])
+        style.configure("Compact.TButton", background=palette["button"], foreground=fg,
+                        bordercolor=border, focusthickness=1, focuscolor=accent,
+                        padding=(8, 4), relief="flat")
+        style.map("Compact.TButton", background=[("pressed", palette["button_hover"]),
+                                                ("active", palette["button_hover"]), ("disabled", panel)],
+                  foreground=[("disabled", palette["disabled"])])
+        style.configure("Accent.TButton", background=accent, foreground="#07131A",
+                        bordercolor=accent, focusthickness=1, focuscolor=fg,
+                        padding=(14, 8), font=("Segoe UI Semibold", 10), relief="flat")
+        style.map("Accent.TButton", background=[("pressed", palette["accent_hover"]),
+                                               ("active", palette["accent_hover"]), ("disabled", panel)],
+                  foreground=[("disabled", muted)])
+        style.configure("Danger.TButton", background=palette["danger"], foreground=palette["danger_fg"],
+                        bordercolor=palette["danger"], focusthickness=1, focuscolor=palette["error"],
+                        padding=(10, 6), relief="flat")
+        style.map("Danger.TButton", background=[("pressed", palette["error"]),
+                                               ("active", palette["danger"])])
+        style.configure("TCheckbutton", background=panel, foreground=fg, indicatorcolor=field,
+                        padding=(2, 3), focuscolor=accent)
+        style.map("TCheckbutton", background=[("active", panel)],
+                  foreground=[("active", fg)], indicatorcolor=[("selected", accent),
+                                                                ("active", palette["button_hover"])])
+        style.configure("Horizontal.TScale", background=panel, troughcolor=field, bordercolor=border,
+                        lightcolor=accent, darkcolor=accent, sliderthickness=14)
+        style.configure("Horizontal.Panel.TScale", background=panel, troughcolor=field, bordercolor=border,
+                        lightcolor=accent, darkcolor=accent, sliderthickness=14)
+        style.configure("Horizontal.TProgressbar", troughcolor=field, background=accent,
+                        bordercolor=field, lightcolor=accent, darkcolor=accent)
+        style.configure("Production.Horizontal.TProgressbar", troughcolor=field, background=accent,
+                        bordercolor=field, lightcolor=accent, darkcolor=accent, thickness=13)
+        style.configure("InspectorHeader.TButton", background=palette["button"], foreground=fg,
+                        bordercolor=border, padding=(9, 7), anchor="w",
+                        font=("Segoe UI Semibold", 10), relief="flat")
+        style.map("InspectorHeader.TButton", background=[("active", palette["button_hover"])],
+                  foreground=[("active", fg)])
+        style.configure("LanguageChip.TLabel", background=palette["selection"], foreground=fg,
+                        padding=(9, 5), font=("Segoe UI Semibold", 10))
+        style.configure("TNotebook", background=bg, borderwidth=0, bordercolor=border,
+                        lightcolor=bg, darkcolor=border, tabmargins=(2, 3, 2, 0))
+        style.configure("TNotebook.Tab", background=panel, foreground=muted,
+                        padding=(16, 7), bordercolor=border, lightcolor=panel, darkcolor=border,
+                        font=("Segoe UI Semibold", 9))
+        style.map("TNotebook.Tab", background=[("selected", palette["button"]),
+                                              ("active", palette["button_hover"])],
+                  foreground=[("selected", accent), ("active", fg)])
+        style.configure("Tools.TNotebook", background=bg, borderwidth=0, bordercolor=bg,
+                        lightcolor=bg, darkcolor=bg, tabmargins=(8, 6, 8, 0))
+        style.configure("Tools.TNotebook.Tab", background=bg, foreground=muted,
+                        font=("Segoe UI Semibold", 10), padding=(20, 8), borderwidth=0,
+                        lightcolor=bg, darkcolor=bg)
+        style.map("Tools.TNotebook.Tab", background=[("selected", panel), ("active", palette["button"])],
+                  foreground=[("selected", accent), ("active", fg)])
+        style.configure("TScrollbar", background=panel, troughcolor=bg, bordercolor=border,
+                        arrowcolor=muted, gripcount=0, arrowsize=10, width=10)
+        style.configure("Inspector.Vertical.TScrollbar", width=16)
+        style.map("TScrollbar", background=[("active", palette["button_hover"])])
+        style.configure("TSeparator", background=border)
+        style.configure("TPanedwindow", background=bg, sashthickness=4, relief="flat")
+        style.configure("TSpinbox", fieldbackground=field, foreground=fg, background=field,
+                        arrowcolor=muted, bordercolor=border, lightcolor=border, darkcolor=border,
+                        insertcolor=fg, padding=(6, 4), arrowsize=11)
+        style.map("TSpinbox", fieldbackground=[("focus", field)], bordercolor=[("focus", accent)])
+        style.configure("Split.Treeview", background=field, fieldbackground=field, foreground=fg,
+                        rowheight=26, bordercolor=border, font=("Segoe UI", 9))
+        style.map("Split.Treeview", background=[("selected", palette["selection"])],
+                  foreground=[("selected", fg)])
+        style.configure("Split.Treeview.Heading", background=panel, foreground=muted,
+                        relief="flat", padding=(8, 6), font=("Segoe UI Semibold", 9))
+        style.map("Split.Treeview.Heading", background=[("active", palette["button_hover"])])
+        self.option_add("*TCombobox*Listbox.background", field)
+        self.option_add("*TCombobox*Listbox.foreground", fg)
+        self.option_add("*TCombobox*Listbox.selectBackground", accent)
         self.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
 
+    def _apply_theme_widgets(self) -> None:
+        palette = self.palette
+        self.configure(bg=palette["bg"])
+        canvas_backgrounds: dict[tk.Canvas, str] = {}
+        if hasattr(self, "preview_canvas"):
+            canvas_backgrounds[self.preview_canvas] = palette["canvas"]
+        splitter_preview = getattr(self.splitter_tab, "canvas", None)
+        if splitter_preview is not None:
+            canvas_backgrounds[splitter_preview] = palette["canvas"]
+        if hasattr(self, "_tools_canvas"):
+            canvas_backgrounds[self._tools_canvas] = palette["panel"]
+        if hasattr(self, "splitter_tab"):
+            for widget in self.splitter_tab.winfo_children():
+                if isinstance(widget, ttk.LabelFrame):
+                    for child in widget.winfo_children():
+                        if isinstance(child, tk.Canvas):
+                            canvas_backgrounds[child] = palette["panel"]
+
+        def recolor(widget: tk.Misc) -> None:
+            if isinstance(widget, tk.Canvas):
+                widget.configure(
+                    bg=canvas_backgrounds.get(widget, palette["bg"]),
+                    highlightbackground=palette["border"],
+                )
+            elif isinstance(widget, tk.Text):
+                widget.configure(
+                    bg=palette["field"], fg=palette["log_fg"],
+                    insertbackground=palette["fg"], selectbackground=palette["selection"],
+                    selectforeground=palette["fg"],
+                )
+                widget.tag_configure("error", foreground=palette["error"])
+                widget.tag_configure("warning", foreground=palette["warning"])
+                widget.tag_configure("success", foreground=palette["success"])
+            elif isinstance(widget, tk.Listbox):
+                widget.configure(
+                    bg=palette["field"], fg=palette["fg"], selectbackground=palette["selection"],
+                    selectforeground=palette["fg"], highlightbackground=palette["border"],
+                )
+            elif isinstance(widget, tk.Label):
+                widget.configure(bg=palette["bg"], fg=palette["fg"])
+            elif isinstance(widget, tk.Frame):
+                widget.configure(bg=palette["bg"])
+            for child in widget.winfo_children():
+                recolor(child)
+
+        recolor(self)
+        if hasattr(self, "source_entry"):
+            self._update_source_required_state()
+        elif hasattr(self, "preview_canvas"):
+            self._show_empty_preview()
+
+    def _set_theme(self, theme: str) -> None:
+        if theme not in THEME_PALETTES:
+            return
+        self.theme_name = theme
+        self.palette = THEME_PALETTES[theme]
+        self.theme_var.set(theme)
+        self.cfg["theme"] = theme
+        save_config(self.cfg)
+        self._apply_theme_styles()
+        self._apply_theme_widgets()
+        self._update_status_style()
+        if hasattr(self, "splitter_tab"):
+            self.splitter_tab._update_status_style()
+        for tooltip in self._tooltips:
+            tooltip.set_palette(self.palette)
+
+    def _update_source_required_state(self) -> None:
+        if not hasattr(self, "source_entry"):
+            return
+        source = self.source.get().strip()
+        valid_source = bool(source) and Path(source).is_file()
+        self.source_entry.configure(style="TEntry" if valid_source else "Required.TEntry")
+        if valid_source:
+            self.preview_canvas.delete("empty-state")
+        else:
+            self._loaded_source_path = None
+            self._show_empty_preview()
+
+    def _source_entry_committed(self, _event=None) -> None:
+        source = self.source.get().strip()
+        if not source:
+            return
+        path = Path(source)
+        if path.is_file() and path.resolve() != self._loaded_source_path:
+            self._clear_batch()
+            self._load_source(source)
+
+    def _show_empty_preview(self) -> None:
+        if not hasattr(self, "preview_canvas"):
+            return
+        canvas = self.preview_canvas
+        canvas.delete("empty-state")
+        if self.source.get().strip() and Path(self.source.get().strip()).is_file():
+            return
+        width = max(1, canvas.winfo_width())
+        height = max(1, canvas.winfo_height())
+        canvas.create_rectangle(
+            1, 1, width - 1, height - 1, fill=self.palette["canvas"],
+            outline="", tags=("empty-state",),
+        )
+        canvas.create_text(
+            width / 2, height / 2, text="Drop video here or click Browse",
+            fill=self.palette["fg"], font=("Segoe UI Semibold", 14),
+            tags=("empty-state",),
+        )
+        canvas.create_text(
+            width / 2, height / 2 + 29, text="MP4 · MKV · MOV · WEBM · AVI",
+            fill=self.palette["muted"], font=("Segoe UI", 10),
+            tags=("empty-state",),
+        )
+        canvas.tag_raise("empty-state")
+
+    def _drop_source(self, event) -> None:
+        dropped = self.tk.splitlist(event.data)
+        if not dropped:
+            return
+        path = Path(dropped[0])
+        if not path.is_file() or path.suffix.lower() not in BATCH_VIDEO_EXTS:
+            messagebox.showerror("Source video", "Drop a supported video file (MP4, MKV, MOV, WEBM, or AVI).")
+            return
+        self._clear_batch()
+        self._load_source(str(path))
+
+    def _toggle_inspector_section(self, name: str) -> None:
+        if name not in self._inspector_sections:
+            return
+        if self._active_inspector_section == name:
+            self._active_inspector_section = None
+        else:
+            self._active_inspector_section = name
+        for section_name, (button, body, _group) in self._inspector_sections.items():
+            is_open = section_name == self._active_inspector_section
+            button.configure(text=f"{'▾' if is_open else '▸'}  {section_name}")
+            if is_open:
+                body.grid(row=1, column=0, sticky="ew")
+            else:
+                body.grid_remove()
+        self.after_idle(lambda: self._tools_canvas.configure(scrollregion=self._tools_canvas.bbox("all")))
+
+    def _toggle_run_logs(self) -> None:
+        expanded = not self.run_logs_expanded.get()
+        self.run_logs_expanded.set(expanded)
+        if expanded:
+            self.log_notebook.grid()
+            self.run_logs_toggle.configure(text="Hide run logs")
+        else:
+            self.log_notebook.grid_remove()
+            self.run_logs_toggle.configure(text="Show run logs")
+
+    def _clear_placeholder(self, entry: ttk.Entry, placeholder: str) -> None:
+        if entry.get() == placeholder:
+            entry.delete(0, "end")
+            entry.configure(foreground=self.palette["fg"])
+
+    def _editor_entry_changed(self, entry: ttk.Entry, variable: tk.StringVar, placeholder: str) -> None:
+        variable.set("" if entry.get() == placeholder else entry.get())
+        self._redraw_editor_items()
+
+    def _sync_editor_entry(self, entry: ttk.Entry, variable: tk.StringVar, placeholder: str) -> None:
+        value = variable.get()
+        shown = entry.get()
+        focused = self.focus_get() is entry
+        expected = value if value else ("" if focused else placeholder)
+        if shown != expected:
+            entry.delete(0, "end")
+            entry.insert(0, expected)
+        entry.configure(foreground=self.palette["fg"] if value or focused else self.palette["muted"])
+
+    def _restore_editor_placeholder(self, entry: ttk.Entry, variable: tk.StringVar, placeholder: str) -> None:
+        if not entry.get().strip() or entry.get() == placeholder:
+            variable.set("")
+            entry.delete(0, "end")
+            entry.insert(0, placeholder)
+            entry.configure(foreground=self.palette["muted"])
+
     def _build(self) -> None:
-        # Layout V33: one-line header, compact source bar, then three resizable panes
-        # (Settings+Logs | Preview | Tools). The preview follows its pane size and always
-        # shows the whole 16:9 frame; the long settings list scrolls inside its own pane.
+        # Keep the preview prominent and framing controls directly beneath it.
         # Tools as tabs (2026-10-17): Recap, Splitter; more tools get their own tab.
         self.tools_tabs = ttk.Notebook(self, style="Tools.TNotebook")
         self.tools_tabs.pack(fill="both", expand=True)
-        recap_tab = ttk.Frame(self.tools_tabs)
+        recap_tab = ttk.Frame(self.tools_tabs, style="Page.TFrame")
         self.tools_tabs.add(recap_tab, text="Recap")
         self.splitter_tab = SplitterTab(self.tools_tabs, cfg=self.cfg, save=lambda: save_config(self.cfg),
                                         tool=lambda name: _tool_path(self.cfg, name), logs_dir=LOGS_DIR)
         self.tools_tabs.add(self.splitter_tab, text="Splitter")
         if self.cfg.get("last_tool_tab") == "splitter":
             self.tools_tabs.select(self.splitter_tab)
-        outer = ttk.Frame(recap_tab, padding=(12, 8, 12, 8))
+        outer = ttk.Frame(recap_tab, padding=(14, 10, 14, 10), style="Page.TFrame")
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(2, weight=1)
 
-        header = tk.Frame(outer, bg=BG)
+        header = ttk.Frame(outer, style="Header.TFrame", padding=(12, 8))
         header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        tk.Label(header, text="Recap Production", bg=BG, fg=FG, font=("Segoe UI Semibold", 15)).pack(side="left")
-        tk.Label(header, text="Any language → Myanmar  |  Narrator only  |  Whisper + Gemini  |  Edge TTS  |  Smart Sync",
-                 bg=BG, fg=MUTED, font=("Segoe UI", 9)).pack(side="left", padx=(14, 0), pady=(5, 0))
+        ttk.Label(header, text="Recap Production", style="Title.TLabel").pack(side="left")
+        ttk.Label(
+            header, text="Translate, narrate, and sync video", style="Subtitle.TLabel",
+        ).pack(side="left", padx=(14, 0), pady=(5, 0))
+        theme_picker = ttk.Frame(header)
+        theme_picker.pack(side="right")
+        ttk.Label(theme_picker, text="Theme").pack(side="left", padx=(0, 6))
+        theme_combo = ttk.Combobox(
+            theme_picker, textvariable=self.theme_var, values=tuple(THEME_PALETTES),
+            state="readonly", width=8,
+        )
+        theme_combo.pack(side="left")
+        theme_combo.bind("<<ComboboxSelected>>", lambda _event: self._set_theme(self.theme_var.get()))
 
-        source_bar = ttk.Frame(outer)
+        source_bar = ttk.LabelFrame(outer, text="1 PROJECT", style="Card.TLabelframe")
         source_bar.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        source_bar.columnconfigure(1, weight=3)
-        source_bar.columnconfigure(4, weight=1)
-        ttk.Label(source_bar, text="Source Video").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self.source_entry = ttk.Entry(source_bar, textvariable=self.source)
-        self.source_entry.grid(row=0, column=1, sticky="ew")
+        source_bar.columnconfigure(1, weight=1)
+        ttk.Label(source_bar, text="Source video *").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=2)
+        self.source_entry = ttk.Entry(source_bar, textvariable=self.source, style="Required.TEntry")
+        self.source_entry.grid(row=0, column=1, sticky="ew", pady=2)
+        self._tooltips.append(ToolTip(self.source_entry, self.source, self.palette))
         self.source_entry.bind("<KeyRelease>", lambda _event: self._clear_batch())
-        source_buttons = ttk.Frame(source_bar)
-        source_buttons.grid(row=0, column=2, padx=(6, 18), sticky="w")
-        ttk.Button(source_buttons, text="Browse", style="Compact.TButton", command=self._browse_source).pack(side="left")
-        ttk.Button(source_buttons, text="Folder", style="Compact.TButton", command=self._browse_folder).pack(side="left", padx=(6, 0))
-        ttk.Label(source_bar, text="Gemini .env").grid(row=0, column=3, sticky="w", padx=(0, 8))
-        ttk.Entry(source_bar, textvariable=self.gemini_env).grid(row=0, column=4, sticky="ew")
-        ttk.Button(source_bar, text="Browse", style="Compact.TButton", command=self._browse_env).grid(row=0, column=5, padx=(6, 0))
-        ttk.Label(source_bar, text="Save final to").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(6, 0))
-        ttk.Entry(source_bar, textvariable=self.final_folder).grid(row=1, column=1, sticky="ew", pady=(6, 0))
+        self.source_entry.bind("<FocusOut>", self._source_entry_committed, add="+")
+        self.source.trace_add("write", lambda *_args: self._update_source_required_state())
+        ttk.Button(source_bar, text="Browse", style="Compact.TButton", command=self._browse_source).grid(
+            row=0, column=2, padx=(6, 0), pady=2)
+        ttk.Button(source_bar, text="Folder...", style="Compact.TButton", command=self._browse_folder).grid(
+            row=0, column=3, padx=(6, 0), pady=2)
+        ttk.Label(source_bar, text="Output folder").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=2)
+        self.final_folder_entry = ttk.Entry(source_bar, textvariable=self.final_folder)
+        self.final_folder_entry.grid(row=1, column=1, sticky="ew", pady=2)
+        self._tooltips.append(ToolTip(self.final_folder_entry, self.final_folder, self.palette))
         ttk.Button(source_bar, text="Browse", style="Compact.TButton", command=self._browse_final_folder).grid(
-            row=1, column=2, padx=(6, 18), pady=(6, 0), sticky="w")
-        ttk.Label(source_bar, text="ဗလာထားရင် job folder ထဲမှာပဲ။ ရွေးထားရင် ပြီးတဲ့ video ကို <name>_Myanmar.mp4 နဲ့ ဒီ folder ထဲ ထည့်ပေးမယ်။",
-                  style="Muted.TLabel").grid(row=1, column=3, columnspan=3, sticky="w", pady=(6, 0))
+            row=1, column=2, padx=(6, 0), pady=2)
+        ttk.Button(source_bar, text="Open", style="Compact.TButton", command=self._open_final_output_folder).grid(
+            row=1, column=3, padx=(6, 0), pady=2)
+        ttk.Label(source_bar, text="Gemini .env").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=2)
+        self.gemini_env_entry = ttk.Entry(source_bar, textvariable=self.gemini_env)
+        self.gemini_env_entry.grid(row=2, column=1, sticky="ew", pady=2)
+        self._tooltips.append(ToolTip(self.gemini_env_entry, self.gemini_env, self.palette))
+        ttk.Button(source_bar, text="Browse", style="Compact.TButton", command=self._browse_env).grid(
+            row=2, column=2, padx=(6, 0), pady=2)
 
         main = ttk.PanedWindow(outer, orient="horizontal")
         main.grid(row=2, column=0, sticky="nsew")
 
-        # ---------------- left: scrollable settings (top) + Run Logs (bottom)
-        left = ttk.PanedWindow(main, orient="vertical")
-        settings_host = ttk.LabelFrame(left, text="Translation / Voice Settings", padding=3)
-        settings_host.rowconfigure(0, weight=1)
-        settings_host.columnconfigure(0, weight=1)
-        settings_canvas = tk.Canvas(settings_host, bg=BG, highlightthickness=0, height=340)
-        settings_canvas.grid(row=0, column=0, sticky="nsew")
-        settings_scroll = ttk.Scrollbar(settings_host, orient="vertical", command=settings_canvas.yview)
-        settings_scroll.grid(row=0, column=1, sticky="ns")
-        settings_canvas.configure(yscrollcommand=settings_scroll.set)
-        source_box = ttk.Frame(settings_canvas, padding=(6, 4, 8, 4))
-        settings_window = settings_canvas.create_window((0, 0), window=source_box, anchor="nw")
-        source_box.bind("<Configure>", lambda _e: settings_canvas.configure(scrollregion=settings_canvas.bbox("all")))
-        settings_canvas.bind("<Configure>", lambda e: settings_canvas.itemconfigure(settings_window, width=e.width))
-        self._bind_wheel(settings_canvas, settings_canvas)
+        # ---------------- left: compact narration setup
+        left = ttk.Frame(main, style="Page.TFrame")
+        settings_host = ttk.LabelFrame(left, text="2 NARRATION", style="Card.TLabelframe")
+        settings_host.pack(fill="x", expand=False)
+        source_box = ttk.Frame(settings_host, padding=(8, 6, 8, 6), style="Panel.TFrame")
+        source_box.pack(fill="x", expand=False)
         source_box.columnconfigure(1, weight=1)
-        hint_wrap = 200
 
-        def hint(row: int, text: str) -> ttk.Label:
-            label = ttk.Label(source_box, text=text, style="Muted.TLabel", wraplength=hint_wrap, justify="left")
-            label.grid(row=row, column=2, sticky="w", padx=(8, 0))
-            return label
-
-        ttk.Label(source_box, text="Source language").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Label(source_box, text="Source language").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
         ttk.Combobox(source_box, textvariable=self.source_language, state="readonly",
-                     values=tuple(LANGUAGE_LABELS.values())).grid(row=1, column=1, sticky="ew", pady=3)
-        hint(1, "ဗီဒီယိုထဲက ပြောတဲ့ ဘာသာ။ Auto-detect = Whisper က နားထောင်ပြီး သိအောင်လုပ်မယ်")
-        ttk.Label(source_box, text="Output").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Label(source_box, text="Myanmar  ·  Narrator only  ·  Edge TTS").grid(
-            row=2, column=1, columnspan=2, sticky="w", pady=3)
+                     values=tuple(LANGUAGE_LABELS.values())).grid(row=0, column=1, sticky="ew", pady=3)
+        ttk.Label(
+            source_box, text="ဗီဒီယိုထဲက ပြောတဲ့ဘာသာ · Auto-detect က Whisper နဲ့ ရှာပေးမယ်",
+            style="Muted.TLabel", wraplength=260, justify="left",
+        ).grid(row=1, column=1, sticky="w", pady=(0, 5))
+        ttk.Label(source_box, text="Output language").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Label(source_box, text="Myanmar", style="LanguageChip.TLabel").grid(
+            row=2, column=1, sticky="w", pady=3)
+        ttk.Label(source_box, text="Narrator only · Edge TTS", style="Muted.TLabel").grid(
+            row=3, column=1, sticky="w", pady=(0, 3))
 
         self.edge_voice_label = ttk.Label(source_box, text="Edge TTS Voice")
-        self.edge_voice_label.grid(row=11, column=0, sticky="w", padx=(0, 8), pady=3)
+        self.edge_voice_label.configure(width=18)
+        self.edge_voice_label.grid(row=4, column=0, sticky="w", padx=(0, 8), pady=3)
         self.edge_voice_combo = ttk.Combobox(source_box, textvariable=self.edge_voice, state="readonly", values=EDGE_VOICES)
-        self.edge_voice_combo.grid(row=11, column=1, sticky="ew", pady=3)
-        self.edge_voice_hint = hint(11, "Local Edge TTS")
+        self.edge_voice_combo.grid(row=4, column=1, sticky="ew", pady=3)
+        self.edge_voice_hint = ttk.Label(source_box, text="Myanmar narration voice", style="Muted.TLabel")
+        self.edge_voice_hint.grid(row=5, column=1, sticky="w", pady=(0, 4))
 
         self.edge_speed_label = ttk.Label(source_box, text="Edge TTS Speed")
-        self.edge_speed_label.grid(row=12, column=0, sticky="w", padx=(0, 8), pady=3)
+        self.edge_speed_label.configure(width=18)
+        self.edge_speed_label.grid(row=6, column=0, sticky="w", padx=(0, 8), pady=3)
         self.edge_speed_frame = ttk.Frame(source_box)
-        self.edge_speed_frame.grid(row=12, column=1, sticky="ew", pady=3)
+        self.edge_speed_frame.grid(row=6, column=1, sticky="ew", pady=3)
         self.edge_speed_frame.columnconfigure(0, weight=1)
         self.edge_speed_slider = ttk.Scale(
             self.edge_speed_frame, from_=-50, to=100, orient="horizontal",
             variable=self.edge_rate_percent, command=self._edge_rate_changed,
         )
         self.edge_speed_slider.grid(row=0, column=0, sticky="ew")
-        self.edge_speed_value = ttk.Label(self.edge_speed_frame, text=_format_edge_rate(self.edge_rate_percent.get()), width=7)
+        self.edge_speed_value = ttk.Label(self.edge_speed_frame, text=_format_edge_rate(self.edge_rate_percent.get()), width=8, anchor="e")
         self.edge_speed_value.grid(row=0, column=1, padx=(8, 0))
-        self.edge_speed_hint = hint(12, "-50% slower · 0% normal · +100% faster")
-
-        self._bind_wheel_recursive(source_box, settings_canvas)
-        self._settings_canvas = settings_canvas
-
-        log_panel = ttk.LabelFrame(left, text="Run Logs", padding=5)
-        log_panel.rowconfigure(0, weight=1)
-        log_panel.columnconfigure(0, weight=1)
-        self.log_notebook = ttk.Notebook(log_panel)
-        self.log_notebook.grid(row=0, column=0, sticky="nsew")
-        self.logbox = self._create_log_tab("Main Log")
-        left.add(settings_host, weight=3)
-        left.add(log_panel, weight=2)
+        self.edge_speed_hint = ttk.Label(source_box, text="-50% slower · 0% normal · +100% faster", style="Muted.TLabel")
+        self.edge_speed_hint.grid(row=7, column=1, sticky="w", pady=(0, 4))
+        ttk.Checkbutton(
+            source_box, text="Short pauses between lines", variable=self.short_pauses, style="TCheckbutton",
+        ).grid(row=8, column=1, sticky="w", pady=(4, 0))
+        ttk.Label(
+            source_box, text="Shortens Edge TTS silence between narration segments", style="Muted.TLabel",
+            wraplength=260, justify="left",
+        ).grid(row=9, column=1, sticky="w", pady=(0, 2))
 
         # ---------------- center: preview that fills its pane
-        preview_box = ttk.LabelFrame(main, text="Preview — drag Title / Logo, draw Blur box", padding=7)
+        preview_box = ttk.LabelFrame(
+            main, text="PREVIEW  ·  Drag Title / Logo · Draw Blur Box", style="Card.TLabelframe",
+        )
         preview_box.columnconfigure(0, weight=1)
         preview_box.rowconfigure(0, weight=1)
-        self.preview_canvas = tk.Canvas(preview_box, width=PREVIEW_W, height=PREVIEW_H, bg="#05070a", highlightthickness=1, highlightbackground=BORDER, cursor="crosshair")
+        self.preview_canvas = tk.Canvas(
+            preview_box, width=PREVIEW_W, height=PREVIEW_H, bg="#05070a",
+            highlightthickness=1, highlightbackground=BORDER, cursor="crosshair",
+        )
         self.preview_canvas.grid(row=0, column=0, sticky="nsew")
         self.preview_canvas.bind("<ButtonPress-1>", self._preview_press)
         self.preview_canvas.bind("<B1-Motion>", self._preview_motion)
         self.preview_canvas.bind("<ButtonRelease-1>", self._preview_release)
         self.preview_canvas.bind("<Configure>", self._preview_resized)
+        if DND_FILES is not None and hasattr(self.preview_canvas, "drop_target_register"):
+            self.preview_canvas.drop_target_register(DND_FILES)
+            self.preview_canvas.dnd_bind("<<Drop>>", self._drop_source)
         self._preview_resize_job = None
         self._preview_canvas_size = (PREVIEW_W, PREVIEW_H)
+        self._show_empty_preview()
+
+        frame_row = ttk.Frame(preview_box)
+        frame_row.grid(row=1, column=0, sticky="ew", pady=(7, 0))
+        frame_row.columnconfigure(3, weight=1)
+        ttk.Label(frame_row, text="Frame").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        ratio_combo = ttk.Combobox(
+            frame_row, textvariable=self.output_ratio, values=OUTPUT_RATIOS,
+            state="readonly", width=9,
+        )
+        ratio_combo.grid(row=0, column=1, sticky="w")
+        ttk.Label(frame_row, text="Fill").grid(row=0, column=2, sticky="e", padx=(10, 6))
+        fill_combo = ttk.Combobox(
+            frame_row, textvariable=self.frame_fill, values=tuple(FILL_LABELS.values()),
+            state="readonly", width=15,
+        )
+        fill_combo.grid(row=0, column=3, sticky="ew")
+        for combo in (ratio_combo, fill_combo):
+            combo.bind("<<ComboboxSelected>>", lambda _e: self._frame_changed())
+
+        zoom_row = ttk.Frame(preview_box)
+        zoom_row.grid(row=2, column=0, sticky="ew", pady=(4, 0))
+        zoom_row.columnconfigure(1, weight=1)
+        ttk.Label(zoom_row, text="Picture size", width=12).grid(row=0, column=0, sticky="w")
+        self.zoom_slider = ttk.Scale(
+            zoom_row, from_=0.80, to=1.25, orient="horizontal",
+            variable=self.zoom_factor, command=self._zoom_changed,
+        )
+        self.zoom_slider.grid(row=0, column=1, sticky="ew")
+        self.zoom_value_label = ttk.Label(
+            zoom_row, text="%", width=2, anchor="w",
+        )
+        self.zoom_percent_entry = ttk.Entry(zoom_row, textvariable=self.zoom_percent, width=5, justify="right")
+        self.zoom_percent_entry.grid(row=0, column=2, padx=(8, 0))
+        self.zoom_value_label.grid(row=0, column=3, padx=(2, 0), sticky="w")
+        self.zoom_percent_entry.bind("<Return>", self._apply_zoom_percent)
+        self.zoom_percent_entry.bind("<FocusOut>", self._apply_zoom_percent)
+        self.zoom_slider.bind("<ButtonRelease-1>", lambda _e: self._refresh_preview())
 
         seek_row = ttk.Frame(preview_box)
-        seek_row.grid(row=1, column=0, sticky="ew", pady=(7, 0))
+        seek_row.grid(row=3, column=0, sticky="ew", pady=(5, 0))
         seek_row.columnconfigure(1, weight=1)
         ttk.Button(seek_row, text="◀ 5s", width=5, style="Compact.TButton", command=lambda: self._seek_preview(-5)).grid(row=0, column=0, padx=(0, 6))
         self.preview_slider = ttk.Scale(seek_row, from_=0.0, to=1.0, orient="horizontal", variable=self.preview_time,
@@ -383,29 +829,54 @@ class App(tk.Tk):
         ttk.Button(seek_row, text="Refresh Frame", command=self._refresh_preview).grid(row=0, column=4, padx=(6, 0))
 
         # ---------------- right: scrollable production tools
-        tools_host = ttk.LabelFrame(main, text="Production Tools", padding=3)
+        tools_host = ttk.LabelFrame(main, text="3 EDITING INSPECTOR", style="Card.TLabelframe")
         tools_host.rowconfigure(0, weight=1)
         tools_host.columnconfigure(0, weight=1)
-        tools_canvas = tk.Canvas(tools_host, bg=BG, highlightthickness=0, width=320)
+        tools_canvas = tk.Canvas(tools_host, bg=PANEL, highlightthickness=0)
+        self._tools_canvas = tools_canvas
         tools_canvas.grid(row=0, column=0, sticky="nsew")
-        tools_scroll = ttk.Scrollbar(tools_host, orient="vertical", command=tools_canvas.yview)
+        tools_scroll = ttk.Scrollbar(
+            tools_host, orient="vertical", command=tools_canvas.yview,
+            style="Inspector.Vertical.TScrollbar",
+        )
         tools_scroll.grid(row=0, column=1, sticky="ns")
         tools_canvas.configure(yscrollcommand=tools_scroll.set)
-        tools = ttk.Frame(tools_canvas, padding=(8, 6, 10, 6))
+        tools = ttk.Frame(tools_canvas, padding=(8, 6, 8, 12), style="Panel.TFrame")
         tools_window = tools_canvas.create_window((0, 0), window=tools, anchor="nw")
         tools.bind("<Configure>", lambda _e: tools_canvas.configure(scrollregion=tools_canvas.bbox("all")))
         tools_canvas.bind("<Configure>", lambda e: tools_canvas.itemconfigure(tools_window, width=e.width))
         self._bind_wheel(tools_canvas, tools_canvas)
         tools.columnconfigure(0, weight=1)
 
-        def section(row: int, text: str) -> None:
-            if row:
-                ttk.Separator(tools).grid(row=row - 1, column=0, sticky="ew", pady=(2, 10))
-            ttk.Label(tools, text=text, font=("Segoe UI Semibold", 10)).grid(row=row, column=0, sticky="w")
+        self._inspector_sections: dict[str, tuple[ttk.Button, ttk.Frame, ttk.Frame]] = {}
+        self._active_inspector_section: str | None = None
 
-        def slider_row(row: int, label: str, from_: float, to: float, variable, on_change, value_label_attr: str,
+        def section(text: str, expanded: bool = False, trailing=None) -> ttk.Frame:
+            group = ttk.Frame(tools, style="Panel.TFrame")
+            group.grid(row=len(self._inspector_sections), column=0, sticky="ew", pady=(0, 6))
+            group.columnconfigure(0, weight=1)
+            header = ttk.Frame(group, style="Panel.TFrame")
+            header.grid(row=0, column=0, sticky="ew")
+            header.columnconfigure(0, weight=1)
+            button = ttk.Button(
+                header, text=f"{'▾' if expanded else '▸'}  {text}",
+                style="InspectorHeader.TButton",
+                command=lambda name=text: self._toggle_inspector_section(name),
+            )
+            button.grid(row=0, column=0, sticky="ew")
+            if trailing is not None:
+                trailing_widget = trailing(header) if callable(trailing) else trailing
+                trailing_widget.grid(row=0, column=1, sticky="e", padx=(4, 6))
+            body = ttk.Frame(group, padding=(8, 5, 8, 7), style="Panel.TFrame")
+            self._inspector_sections[text] = (button, body, group)
+            if expanded:
+                body.grid(row=1, column=0, sticky="ew")
+                self._active_inspector_section = text
+            return body
+
+        def slider_row(parent, row: int, label: str, from_: float, to: float, variable, on_change, value_label_attr: str,
                        text: str, pady=(3, 10)) -> ttk.Scale:
-            frame = ttk.Frame(tools)
+            frame = ttk.Frame(parent)
             frame.grid(row=row, column=0, sticky="ew", pady=pady)
             frame.columnconfigure(1, weight=1)
             ttk.Label(frame, text=label, width=9).grid(row=0, column=0, sticky="w")
@@ -416,19 +887,17 @@ class App(tk.Tk):
             setattr(self, value_label_attr, value)
             return scale
 
-        section(0, "Video")
-        self.zoom_slider = slider_row(1, "Zoom", 0.80, 1.25, self.zoom_factor, self._zoom_changed,
-                                      "zoom_value_label", f"{float(self.zoom_factor.get()):.2f}x")
-        self.zoom_slider.bind("<ButtonRelease-1>", lambda _e: self._refresh_preview())
+        playback = section("Playback", expanded=True)
         ttk.Checkbutton(
-            self.zoom_slider.master,
-            text="Mirror video (also reverses on-screen text)",
+            playback,
+            text="Mirror video",
             variable=self.mirror_video,
             command=self._mirror_changed,
-        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+            style="TCheckbutton",
+        ).grid(row=0, column=0, sticky="w", pady=(2, 0))
         self._voice_volume_scale_var = tk.DoubleVar(value=float(self.voice_volume.get()))
-        volume_frame = ttk.Frame(self.zoom_slider.master)
-        volume_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        volume_frame = ttk.Frame(playback)
+        volume_frame.grid(row=1, column=0, sticky="ew", pady=(7, 0))
         volume_frame.columnconfigure(1, weight=1)
         ttk.Label(volume_frame, text="Voice vol", width=9).grid(row=0, column=0, sticky="w")
         ttk.Scale(volume_frame, from_=50, to=300, orient="horizontal", variable=self._voice_volume_scale_var,
@@ -436,105 +905,151 @@ class App(tk.Tk):
         self.voice_volume_label = ttk.Label(volume_frame, text="", width=13, anchor="e")
         self.voice_volume_label.grid(row=0, column=2, padx=(8, 0))
         self._voice_volume_changed(self.voice_volume.get())
-        ttk.Checkbutton(self.zoom_slider.master, text="Short pauses (~0.25 s between lines)",
-                        variable=self.short_pauses).grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
-        frame_row = ttk.Frame(self.zoom_slider.master)
-        frame_row.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 0))
-        frame_row.columnconfigure(3, weight=1)
-        ttk.Label(frame_row, text="Ratio", width=9).grid(row=0, column=0, sticky="w")
-        ratio_combo = ttk.Combobox(frame_row, textvariable=self.output_ratio, values=OUTPUT_RATIOS, state="readonly", width=9)
-        ratio_combo.grid(row=0, column=1, sticky="w")
-        ttk.Label(frame_row, text="Fill").grid(row=0, column=2, sticky="e", padx=(10, 6))
-        fill_combo = ttk.Combobox(frame_row, textvariable=self.frame_fill, values=tuple(FILL_LABELS.values()),
-                                  state="readonly", width=15)
-        fill_combo.grid(row=0, column=3, sticky="ew")
-        for combo in (ratio_combo, fill_combo):
-            combo.bind("<<ComboboxSelected>>", lambda _e: self._frame_changed())
         ttk.Checkbutton(
-            self.zoom_slider.master,
-            text="Show original transcript captions",
+            playback,
+            text="Original transcript captions",
             variable=self.subtitles_enabled,
-        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
+            style="TCheckbutton",
+        ).grid(row=2, column=0, sticky="w", pady=(5, 0))
 
-        section(3, "Blur Watermark Area")
-        blur_row = ttk.Frame(tools)
-        blur_row.grid(row=4, column=0, sticky="ew", pady=(5, 10))
-        ttk.Button(blur_row, text="+ Draw Blur Box", style="Compact.TButton", command=self._begin_blur_box).pack(side="left")
-        ttk.Button(blur_row, text="Delete Selected", style="Compact.TButton", command=self._delete_selected_blur).pack(side="left", padx=6)
+        blur = section("Blur Watermark Area")
+        blur_row = ttk.Frame(blur)
+        blur_row.grid(row=0, column=0, sticky="ew", pady=(2, 2))
+        blur_row.columnconfigure(0, weight=1)
+        ttk.Button(blur_row, text="Draw Blur Box", style="Compact.TButton",
+                   command=self._begin_blur_box).grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        ttk.Button(blur_row, text="Delete Selected", style="Compact.TButton",
+                   command=self._delete_selected_blur).grid(row=1, column=0, sticky="ew")
         self.blur_count_label = ttk.Label(blur_row, text="0 box", style="Muted.TLabel")
-        self.blur_count_label.pack(side="left", padx=(4, 0))
-        section(6, "Title")
-        self.title_entry = ttk.Entry(tools, textvariable=self.title_text, font=("Myanmar Text", 10))
-        self.title_entry.grid(row=7, column=0, sticky="ew", pady=(5, 4))
-        self.title_entry.bind("<KeyRelease>", lambda _e: self._redraw_editor_items())
+        self.blur_count_label.grid(row=2, column=0, sticky="w", pady=(3, 0))
+        title_body = section("Title")
+        self.title_entry = ttk.Entry(title_body, font=("Myanmar Text", 11))
+        self.title_entry.insert(0, "Enter title...")
+        self.title_entry.configure(foreground=self.palette["muted"])
+        self.title_entry.grid(row=0, column=0, sticky="ew", pady=(2, 4))
+        self.title_entry.bind("<FocusIn>", lambda _e: self._clear_placeholder(self.title_entry, "Enter title..."))
+        self.title_entry.bind("<FocusOut>", lambda _e: self._restore_editor_placeholder(
+            self.title_entry, self.title_text, "Enter title..."))
+        self.title_entry.bind("<KeyRelease>", lambda _e: self._editor_entry_changed(
+            self.title_entry, self.title_text, "Enter title..."))
+        self.title_text.trace_add("write", lambda *_args: self._sync_editor_entry(
+            self.title_entry, self.title_text, "Enter title..."))
         self._title_size_scale_var = tk.DoubleVar(value=float(self.title_size.get()))
-        title_scale = slider_row(8, "Size", 24, 96, self._title_size_scale_var,
+        title_scale = slider_row(title_body, 1, "Size", 24, 96, self._title_size_scale_var,
                                  lambda v: self._int_slider_changed(v, self.title_size, "title_size_label"),
                                  "title_size_label", str(int(self.title_size.get())), pady=(0, 2))
         title_scale.bind("<ButtonRelease-1>", lambda _e: self._redraw_editor_items())
-        ttk.Label(tools, text="Drag the title on the preview to move it", style="Muted.TLabel").grid(row=9, column=0, sticky="w", pady=(0, 10))
+        ttk.Label(title_body, text="Drag the title on the preview to move it", style="Muted.TLabel").grid(
+            row=2, column=0, sticky="w", pady=(0, 2))
 
-        ttk.Separator(tools).grid(row=10, column=0, sticky="ew", pady=(2, 10))
-        logo_header = ttk.Frame(tools)
-        logo_header.grid(row=11, column=0, sticky="ew")
-        logo_header.columnconfigure(0, weight=1)
-        ttk.Label(logo_header, text="Logo", font=("Segoe UI Semibold", 10)).grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(logo_header, text="Enable Logo", variable=self.logo_enabled, command=self._logo_enabled_changed).grid(row=0, column=1, sticky="e")
-        logo_row = ttk.Frame(tools)
-        logo_row.grid(row=12, column=0, sticky="ew", pady=(5, 4))
+        logo_body = section(
+            "Logo",
+            trailing=lambda parent: ttk.Checkbutton(
+                parent, text="Enable", variable=self.logo_enabled,
+                command=self._logo_enabled_changed, style="TCheckbutton",
+            ),
+        )
+        logo_row = ttk.Frame(logo_body)
+        logo_row.grid(row=0, column=0, sticky="ew", pady=(2, 4))
         logo_row.columnconfigure(0, weight=1)
         ttk.Entry(logo_row, textvariable=self.logo_path).grid(row=0, column=0, sticky="ew")
         ttk.Button(logo_row, text="Browse", width=7, style="Compact.TButton", command=self._browse_logo).grid(row=0, column=1, padx=(6, 0))
         ttk.Button(logo_row, text="Remove", width=7, style="Compact.TButton", command=self._remove_logo).grid(row=0, column=2, padx=(6, 0))
-        self.logo_size_slider = slider_row(13, "Size", 0.06, 0.35, self.logo_width_frac, lambda _v: self._redraw_editor_items(),
+        self.logo_size_slider = slider_row(logo_body, 1, "Size", 0.06, 0.35, self.logo_width_frac, lambda _v: self._redraw_editor_items(),
                                            "logo_size_label", f"{self.logo_width_frac.get()*100:.0f}%", pady=(2, 2))
         self.logo_size_slider.bind("<ButtonRelease-1>", lambda _e: self._redraw_editor_items())
-        self.logo_opacity_slider = slider_row(14, "Opacity", 0.10, 1.00, self.logo_opacity, lambda _v: self._logo_opacity_changed(),
+        self.logo_opacity_slider = slider_row(logo_body, 2, "Opacity", 0.10, 1.00, self.logo_opacity, lambda _v: self._logo_opacity_changed(),
                                               "logo_opacity_label", f"{self.logo_opacity.get()*100:.0f}%", pady=(2, 10))
         self.logo_opacity_slider.bind("<ButtonRelease-1>", lambda _e: self._redraw_editor_items())
 
-        section(16, "Extra Text Box")
-        self.extra_text_entry = ttk.Entry(tools, textvariable=self.extra_text, font=("Myanmar Text", 10))
-        self.extra_text_entry.grid(row=17, column=0, sticky="ew", pady=(5, 4))
-        self.extra_text_entry.bind("<KeyRelease>", lambda _e: self._redraw_editor_items())
+        extra_body = section("Extra Text Box")
+        self.extra_text_entry = ttk.Entry(extra_body, font=("Myanmar Text", 11))
+        self.extra_text_entry.insert(0, "Enter text...")
+        self.extra_text_entry.configure(foreground=self.palette["muted"])
+        self.extra_text_entry.grid(row=0, column=0, sticky="ew", pady=(2, 4))
+        self.extra_text_entry.bind("<FocusIn>", lambda _e: self._clear_placeholder(self.extra_text_entry, "Enter text..."))
+        self.extra_text_entry.bind("<FocusOut>", lambda _e: self._restore_editor_placeholder(
+            self.extra_text_entry, self.extra_text, "Enter text..."))
+        self.extra_text_entry.bind("<KeyRelease>", lambda _e: self._editor_entry_changed(
+            self.extra_text_entry, self.extra_text, "Enter text..."))
+        self.extra_text.trace_add("write", lambda *_args: self._sync_editor_entry(
+            self.extra_text_entry, self.extra_text, "Enter text..."))
         self._extra_size_scale_var = tk.DoubleVar(value=float(self.extra_text_size.get()))
-        extra_scale = slider_row(18, "Size", 18, 84, self._extra_size_scale_var,
+        extra_scale = slider_row(extra_body, 1, "Size", 18, 84, self._extra_size_scale_var,
                                  lambda v: self._int_slider_changed(v, self.extra_text_size, "extra_size_label"),
                                  "extra_size_label", str(int(self.extra_text_size.get())), pady=(0, 2))
         extra_scale.bind("<ButtonRelease-1>", lambda _e: self._redraw_editor_items())
-        self.extra_opacity_slider = slider_row(19, "Opacity", 0.10, 1.00, self.extra_text_opacity, lambda _v: self._extra_opacity_changed(),
+        self.extra_opacity_slider = slider_row(extra_body, 2, "Opacity", 0.10, 1.00, self.extra_text_opacity, lambda _v: self._extra_opacity_changed(),
                                                "extra_opacity_label", f"{self.extra_text_opacity.get()*100:.0f}%", pady=(2, 2))
         self.extra_opacity_slider.bind("<ButtonRelease-1>", lambda _e: self._redraw_editor_items())
-        ttk.Label(tools, text="Drag the text on the preview to move it", style="Muted.TLabel").grid(row=20, column=0, sticky="w", pady=(0, 10))
+        ttk.Label(extra_body, text="Drag the text on the preview to move it", style="Muted.TLabel").grid(
+            row=3, column=0, sticky="w", pady=(0, 2))
         self._bind_wheel_recursive(tools, tools_canvas)
         # Job resume / config loads set the IntVars directly; keep the sliders in step.
         self.title_size.trace_add("write", lambda *_a: self._sync_int_slider(self.title_size, self._title_size_scale_var, "title_size_label"))
         self.extra_text_size.trace_add("write", lambda *_a: self._sync_int_slider(self.extra_text_size, self._extra_size_scale_var, "extra_size_label"))
 
-        main.add(left, weight=3)
-        main.add(preview_box, weight=6)
+        main.add(left, weight=2)
+        main.add(preview_box, weight=7)
         main.add(tools_host, weight=2)
-        self._main_pane, self._left_pane = main, left
+        self._main_pane = main
+        self._pane_layout_job = None
+        self.bind("<Configure>", self._schedule_pane_layout, add="+")
         self.after(250, self._apply_pane_layout)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        controls = ttk.Frame(outer)
-        controls.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+        log_panel = ttk.LabelFrame(outer, text="4 RUN · RUN LOGS", style="Card.TLabelframe")
+        log_panel.grid(row=3, column=0, sticky="ew", pady=(5, 0))
+        log_panel.columnconfigure(0, weight=1)
+        self.run_logs_toggle = ttk.Button(
+            log_panel, text="Show run logs", style="Compact.TButton",
+            command=self._toggle_run_logs,
+        )
+        self.run_logs_toggle.grid(row=0, column=0, sticky="w")
+        self.log_notebook = ttk.Notebook(log_panel)
+        self.log_notebook.grid(row=1, column=0, sticky="nsew", pady=(5, 0))
+        log_panel.rowconfigure(1, weight=1)
+        self.logbox = self._create_log_tab("Main Log")
+        self.log_notebook.grid_remove()
+
+        controls = ttk.Frame(outer, padding=(10, 8), style="Header.TFrame")
+        controls.grid(row=4, column=0, sticky="ew", pady=(5, 0))
         controls.columnconfigure(0, weight=1)
         btns = ttk.Frame(controls)
-        btns.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        btns.grid(row=0, column=0, sticky="ew", pady=(0, 5))
         self.start_btn = ttk.Button(btns, text="START / RESUME", style="Accent.TButton", command=self._start)
         self.start_btn.pack(side="left")
         self.stop_btn = ttk.Button(btns, text="STOP SAFELY", style="Danger.TButton", command=self._stop, state="disabled")
         self.stop_btn.pack(side="left", padx=8)
-        ttk.Button(btns, text="Open Job Folder", command=self._open_output).pack(side="left")
-        ttk.Button(btns, text="Edit Text", command=self._open_text_editor).pack(side="left", padx=(8, 0))
-        ttk.Label(btns, textvariable=self.job_display, style="Muted.TLabel").pack(side="left", padx=(12, 0))
-        ttk.Label(btns, textvariable=self.stage, style="Muted.TLabel").pack(side="right", padx=(8, 0))
-        ttk.Label(btns, textvariable=self.status, style="Status.TLabel").pack(side="right")
+        ttk.Button(btns, text="Open Job Folder", style="Action.TButton", command=self._open_output).pack(side="left")
+        ttk.Button(btns, text="Open Output Folder", style="Action.TButton",
+                   command=self._open_final_output_folder).pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="Edit Text", command=self._open_text_editor,
+                   style="Action.TButton").pack(side="left", padx=(8, 0))
+        ttk.Frame(btns).pack(side="left", fill="x", expand=True)
+        self.status_label = ttk.Label(btns, textvariable=self.status, style="Status.TLabel")
+        self.status_label.pack(side="left", padx=(8, 4))
+        self.progress_percent_label = ttk.Label(
+            btns, textvariable=self.progress_percent, style="PanelMuted.TLabel", width=5, anchor="e",
+        )
+        self.progress_percent_label.pack(side="left", padx=(0, 4))
+        info = ttk.Frame(controls)
+        info.grid(row=1, column=0, sticky="ew", pady=(0, 4))
+        info.columnconfigure(0, weight=1)
+        self.job_label = ttk.Label(info, textvariable=self.job_display, style="Muted.TLabel")
+        self.job_label.grid(row=0, column=0, sticky="w")
+        self.stage_label = ttk.Label(info, textvariable=self.stage, style="Muted.TLabel")
+        self.stage_label.grid(row=0, column=1, sticky="e", padx=(8, 12))
+        self.status.trace_add("write", lambda *_args: self._update_status_style())
 
-        self.progress = ttk.Progressbar(controls, mode="determinate", maximum=100)
-        self.progress.grid(row=1, column=0, sticky="ew")
+        progress_row = ttk.Frame(controls, style="Header.TFrame")
+        progress_row.grid(row=2, column=0, sticky="ew")
+        progress_row.columnconfigure(0, weight=1)
+        self.progress = ttk.Progressbar(
+            progress_row, mode="determinate", maximum=100, style="Production.Horizontal.TProgressbar",
+        )
+        self.progress.grid(row=0, column=0, sticky="ew", ipady=2)
+        self._update_status_style()
 
     # ---------------------------------------------------------------- layout helpers
     UI_LAYOUT_FILE = LOGS_DIR / "ui_layout.json"
@@ -550,37 +1065,41 @@ class App(tk.Tk):
         for child in widget.winfo_children():
             self._bind_wheel_recursive(child, canvas)
 
+    def _schedule_pane_layout(self, _event=None) -> None:
+        if not hasattr(self, "_main_pane"):
+            return
+        if self._pane_layout_job is not None:
+            self.after_cancel(self._pane_layout_job)
+        self._pane_layout_job = self.after(160, self._apply_pane_layout)
+
     def _apply_pane_layout(self) -> None:
-        """Default sashes (settings pane ~38%, tools ~19%); a layout dragged last time wins."""
+        """Keep settings/tools compact so the preview gets the largest share of the window."""
+        self._pane_layout_job = None
         try:
             self.update_idletasks()
             width = self._main_pane.winfo_width()
-            height = self._left_pane.winfo_height()
-            if width < 400 or height < 200:
+            if width < 400:
                 self.after(250, self._apply_pane_layout)
                 return
             try:
                 saved = json.loads(self.UI_LAYOUT_FILE.read_text(encoding="utf-8"))
             except Exception:
                 saved = {}
-            left_w = int(saved.get("left_fraction", 0.38) * width)
+            left_w = int(saved.get("left_fraction", 0.27) * width)
             tools_w = int(saved.get("tools_fraction", 0.19) * width)
-            left_w = max(520, min(left_w, width - tools_w - 420))
+            left_w = max(270, min(left_w, int(width * 0.30), width - tools_w - 440))
+            tools_w = max(250, min(tools_w, int(width * 0.25), width - left_w - 440))
             self._main_pane.sashpos(0, left_w)
-            self._main_pane.sashpos(1, max(left_w + 420, width - tools_w))
-            setup_h = int(saved.get("setup_fraction", 0) * height) or int(height * 0.62)
-            self._left_pane.sashpos(0, max(160, min(setup_h, height - 120)))
+            self._main_pane.sashpos(1, max(left_w + 440, width - tools_w))
         except Exception as exc:
             self._log(f"⚠️ Layout restore skipped: {exc}")
 
     def _save_pane_layout(self) -> None:
         try:
             width = max(1, self._main_pane.winfo_width())
-            height = max(1, self._left_pane.winfo_height())
             data = {
                 "left_fraction": round(self._main_pane.sashpos(0) / width, 4),
                 "tools_fraction": round((width - self._main_pane.sashpos(1)) / width, 4),
-                "setup_fraction": round(self._left_pane.sashpos(0) / height, 4),
             }
             self.UI_LAYOUT_FILE.parent.mkdir(parents=True, exist_ok=True)
             self.UI_LAYOUT_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -629,7 +1148,10 @@ class App(tk.Tk):
         if size == self._preview_canvas_size:
             return
         self._preview_canvas_size = size
-        self._redraw_editor_items()
+        if not self.source.get().strip() or not Path(self.source.get().strip()).is_file():
+            self._show_empty_preview()
+        else:
+            self._redraw_editor_items()
         # Re-extract the frame only after the user stops resizing.
         if self._preview_resize_job is not None:
             self.after_cancel(self._preview_resize_job)
@@ -662,11 +1184,14 @@ class App(tk.Tk):
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
         box = tk.Text(
-            frame, wrap="word", width=36, height=12, bg="#080a0e", fg="#d9dee8",
-            insertbackground=FG, selectbackground="#274d8b", selectforeground="#ffffff",
+            frame, wrap="word", width=36, height=12, bg=self.palette["field"], fg=self.palette["log_fg"],
+            insertbackground=FG, selectbackground=self.palette["selection"], selectforeground="#ffffff",
             relief="flat", borderwidth=0, padx=8, pady=8, font=("Consolas", 9),
         )
         box.grid(row=0, column=0, sticky="nsew")
+        box.tag_configure("error", foreground=self.palette["error"])
+        box.tag_configure("warning", foreground=self.palette["warning"])
+        box.tag_configure("success", foreground=self.palette["success"])
         scroll = ttk.Scrollbar(frame, command=box.yview)
         scroll.grid(row=0, column=1, sticky="ns")
         box.configure(yscrollcommand=scroll.set)
@@ -675,9 +1200,49 @@ class App(tk.Tk):
 
     def _zoom_changed(self, value: str) -> None:
         try:
-            self.zoom_value_label.configure(text=f"{float(value):.2f}x")
+            self.zoom_percent.set(f"{float(value) * 100:.0f}")
         except Exception:
             pass
+
+    def _update_status_style(self) -> None:
+        if not hasattr(self, "status_label"):
+            return
+        text = str(self.status.get()).upper()
+        if "ERROR" in text or "FAIL" in text:
+            foreground = self.palette["error"]
+        elif "DONE" in text or "COMPLETE" in text:
+            foreground = self.palette["success"]
+        elif text in {"READY", "IDLE"}:
+            foreground = self.palette["muted"]
+        else:
+            foreground = self.palette["accent"]
+        style = ttk.Style(self)
+        status_style = (foreground, self.palette["panel"])
+        if getattr(self, "_status_color", None) != status_style:
+            style.configure(
+                "ProductionStatus.TLabel",
+                background=self.palette["panel"],
+                foreground=foreground,
+                font=("Segoe UI Semibold", 10),
+            )
+            self._status_color = status_style
+        self.status_label.configure(style="ProductionStatus.TLabel")
+
+    def _apply_zoom_percent(self, _event=None) -> str:
+        try:
+            percent = int(self.zoom_percent.get().strip())
+        except ValueError:
+            messagebox.showwarning("Picture size", "Enter a whole percentage from 80 to 125.")
+            self.zoom_percent.set(f"{float(self.zoom_factor.get()) * 100:.0f}")
+            return "break"
+        if not 80 <= percent <= 125:
+            messagebox.showwarning("Picture size", "Picture size must be between 80% and 125%.")
+            self.zoom_percent.set(f"{float(self.zoom_factor.get()) * 100:.0f}")
+            return "break"
+        self.zoom_factor.set(percent / 100.0)
+        self.zoom_percent.set(str(percent))
+        self._refresh_preview()
+        return "break"
 
     def _logo_opacity_changed(self) -> None:
         try:
@@ -768,6 +1333,7 @@ class App(tk.Tk):
     def _refresh_preview(self) -> None:
         src = self.source.get().strip()
         if not src or not Path(src).is_file():
+            self._show_empty_preview()
             return
         try:
             ffmpeg = _tool_path(self.cfg, "ffmpeg")
@@ -779,6 +1345,7 @@ class App(tk.Tk):
                 ratio=self.output_ratio.get(), fill=self._fill_code(), source_size=self.source_size,
             )
             self._preview_photo = tk.PhotoImage(file=str(out))
+            self.preview_canvas.delete("empty-state")
             self.preview_canvas.delete("frame")
             self.preview_canvas.create_image(ox, oy, image=self._preview_photo, anchor="nw", tags=("frame",))
             self.preview_canvas.tag_lower("frame")
@@ -837,6 +1404,10 @@ class App(tk.Tk):
                 self._log(f"⚠️ Logo preview error: {exc}")
 
     def _preview_press(self, event) -> None:
+        src = self.source.get().strip()
+        if not src or not Path(src).is_file():
+            self._browse_source()
+            return
         x, y = self._preview_xy(event)
         if self._draw_blur_mode:
             self._draw_start = (x, y)
@@ -933,13 +1504,20 @@ class App(tk.Tk):
                 kind, payload = self.msgq.get_nowait()
                 if kind == "log":
                     text = str(payload)
-                    self.logbox.insert("end", text + "\n")
-                    self.logbox.see("end")
+                    follow_tail = self.logbox.yview()[1] >= 0.999
+                    upper = text.upper()
+                    tag = "error" if "❌" in text or "ERROR" in upper or "FAILED" in upper else (
+                        "warning" if "⚠" in text else "success" if "✅" in text else "info"
+                    )
+                    self.logbox.insert("end", text + "\n", tag)
+                    if follow_tail:
+                        self.logbox.see("end")
                     self._append_log_file(text)
                 elif kind == "progress":
                     current, total, label = payload
                     pct = 0 if not total else current * 100.0 / total
                     self.progress["value"] = max(0, min(100, pct))
+                    self.progress_percent.set(f"{round(max(0, min(100, pct))):.0f}%")
                     self.status.set(str(label))
                 elif kind == "stage":
                     self.stage.set(str(payload))
@@ -948,6 +1526,7 @@ class App(tk.Tk):
                 elif kind == "done":
                     self._running(False)
                     self.progress["value"] = 100
+                    self.progress_percent.set("100%")
                     self.status.set("DONE")
                     self.stage.set("Completed")
                     messagebox.showinfo("DONE", str(payload))
@@ -1017,6 +1596,7 @@ class App(tk.Tk):
 
     def _load_source(self, p: str) -> None:
         if p:
+            self._loaded_source_path = Path(p).resolve()
             self.source.set(p)
             self.source_title.set(Path(p).stem)
             self.blur_boxes = []
@@ -1254,6 +1834,7 @@ class App(tk.Tk):
         self._running(True)
         self.logbox.delete("1.0", "end")
         self.progress["value"] = 0
+        self.progress_percent.set("0%")
         self.status.set("STARTING")
         self.stage.set("Preparing")
         self._log(f"📦 {self.source_language.get()} → Myanmar · Narrator only · Edge TTS · V2 Smart Sync")
@@ -1467,7 +2048,10 @@ class App(tk.Tk):
             return
         self._text_editor = NarrationEditor(
             self, job, start_segment=segment or 1, on_saved=lambda n, _t: self._narration_saved(n),
-            colors={"bg": BG, "panel": PANEL, "fg": FG, "muted": MUTED},
+            colors={
+                "bg": self.palette["bg"], "panel": self.palette["panel"],
+                "fg": self.palette["fg"], "muted": self.palette["muted"],
+            },
         )
 
     def _narration_saved(self, segment: int) -> None:
@@ -1482,6 +2066,26 @@ class App(tk.Tk):
             messagebox.showinfo("Output", "Job folder မရှိသေးပါ။")
             return
         os.startfile(str(job))
+
+    def _open_final_output_folder(self) -> None:
+        folder = self.final_folder.get().strip()
+        if folder:
+            target = Path(folder).expanduser()
+        else:
+            source = self.source.get().strip()
+            if not source:
+                messagebox.showinfo("Output Folder", "Choose a source video or set an output folder first.")
+                return
+            job = _job_dir_for(Path(source))
+            target = job / "edge_tts_smart_sync"
+            if not target.is_dir():
+                messagebox.showinfo("Output Folder", "The output folder is not available until a render has started.")
+                return
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(target))
+        except OSError as exc:
+            messagebox.showerror("Output Folder", f"Could not open output folder:\n{target}\n\n{exc}")
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import time
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Optional
 
@@ -388,12 +389,10 @@ class WhisperTimestampService:
 
 
     @staticmethod
-    def _assess_vad_fallback_quality(result: dict[str, Any]) -> dict[str, Any]:
-        """Conservatively decide whether a VAD-OFF rescue looks like real speech.
-
-        This guard runs ONLY after VAD=ON returned zero segments. In that state,
-        tiny/repetitive VAD-OFF transcripts are commonly music/noise hallucinations.
-        """
+    def _assess_vad_fallback_quality(
+        result: dict[str, Any], *, min_unique_ratio: Optional[float] = None
+    ) -> dict[str, Any]:
+        """Conservatively decide whether a VAD-OFF rescue looks like real speech."""
         segments = result.get("segments") or []
         transcript = " ".join(str(seg.get("text") or "") for seg in segments).strip()
         tokens = [
@@ -436,7 +435,9 @@ class WhisperTimestampService:
         reasons: list[str] = []
         min_words = max(4, int(os.getenv("WHISPER_FALLBACK_MIN_WORDS", "10")))
         min_spoken_seconds = max(1.0, float(os.getenv("WHISPER_FALLBACK_MIN_SPEECH_SECONDS", "5.0")))
-        min_unique_ratio = min(1.0, max(0.0, float(os.getenv("WHISPER_FALLBACK_MIN_UNIQUE_RATIO", "0.42"))))
+        if min_unique_ratio is None:
+            min_unique_ratio = float(os.getenv("WHISPER_FALLBACK_MIN_UNIQUE_RATIO", "0.42"))
+        min_unique_ratio = min(1.0, max(0.0, float(min_unique_ratio)))
         min_language_probability = min(1.0, max(0.0, float(os.getenv("WHISPER_FALLBACK_MIN_LANGUAGE_PROB", "0.35"))))
         min_coverage = min(1.0, max(0.0, float(os.getenv("WHISPER_FALLBACK_MIN_COVERAGE", "0.08"))))
         max_no_speech_prob = min(1.0, max(0.0, float(os.getenv("WHISPER_FALLBACK_MAX_NO_SPEECH_PROB", "0.65"))))
@@ -468,6 +469,70 @@ class WhisperTimestampService:
             "avg_logprob": avg_logprob,
             "avg_no_speech_prob": avg_no_speech_prob,
         }
+
+    @staticmethod
+    def assess_transcript_completeness(
+        result: dict[str, Any], media_duration: Optional[float] = None
+    ) -> dict[str, Any]:
+        """Flag long-source transcripts whose text and timestamp evidence are unusually sparse."""
+        segments = [seg for seg in result.get("segments") or [] if isinstance(seg, dict)]
+        duration = float(media_duration or result.get("media_duration") or 0.0)
+        text = " ".join(str(seg.get("text") or "") for seg in segments)
+        words = [word for word in text.split() if any(char.isalnum() for char in word)]
+        text_characters = sum(char.isalnum() for char in text)
+        spoken_seconds = 0.0
+        missing_timestamps = 0
+        for segment in segments:
+            try:
+                start = float(segment["start"])
+                end = float(segment["end"])
+                if end <= start:
+                    missing_timestamps += 1
+                    continue
+                spoken_seconds += end - start
+            except (KeyError, TypeError, ValueError):
+                missing_timestamps += 1
+
+        coverage = spoken_seconds / duration if duration > 0 else None
+        min_duration = max(20.0, float(os.getenv("WHISPER_SPARSE_MIN_DURATION", "60")))
+        max_words = max(1, int(os.getenv("WHISPER_SPARSE_MAX_WORDS", "8")))
+        max_coverage = min(1.0, max(0.0, float(os.getenv("WHISPER_SPARSE_MAX_COVERAGE", "0.025"))))
+        min_characters = max(16, max_words * 4)
+        reasons: list[str] = []
+        if (
+            duration >= min_duration
+            and len(words) < max_words
+            and text_characters < min_characters
+            and coverage is not None
+            and coverage < max_coverage
+        ):
+            reasons.append(
+                f"long_source_sparse_transcript={len(words)}_words/{spoken_seconds:.2f}s/"
+                f"{text_characters}_characters/{coverage:.2%}_coverage"
+            )
+        if duration >= min_duration and segments and missing_timestamps:
+            reasons.append(f"missing_or_invalid_timestamps={missing_timestamps}/{len(segments)}")
+
+        return {
+            "suspicious": bool(reasons),
+            "reasons": reasons,
+            "media_duration": round(duration, 3),
+            "word_count": len(words),
+            "text_characters": text_characters,
+            "spoken_seconds": round(spoken_seconds, 3),
+            "speech_coverage": round(coverage, 4) if coverage is not None else None,
+            "missing_timestamps": missing_timestamps,
+        }
+
+    @staticmethod
+    def _sparse_transcripts_agree(first: dict[str, Any], second: dict[str, Any]) -> bool:
+        first_text = " ".join(str(seg.get("text") or "") for seg in first.get("segments") or [])
+        second_text = " ".join(str(seg.get("text") or "") for seg in second.get("segments") or [])
+        normalize = lambda value: " ".join(
+            "".join(char.lower() if char.isalnum() else " " for char in value).split()
+        )
+        first_text, second_text = normalize(first_text), normalize(second_text)
+        return bool(first_text and second_text and SequenceMatcher(None, first_text, second_text).ratio() >= 0.90)
 
     def transcribe(self, media_path: str, media_duration: Optional[float] = None) -> dict[str, Any]:
         path = Path(media_path).resolve()
@@ -515,6 +580,83 @@ class WhisperTimestampService:
             result["media_duration"] = round(float(result["segments"][-1]["end"]), 3)
 
         result["text"] = " ".join(seg["text"] for seg in result["segments"]).strip()
+
+        sparse_assessment = self.assess_transcript_completeness(result, media_duration)
+        result["transcript_validation"] = {
+            "status": "complete",
+            **sparse_assessment,
+        }
+        if sparse_assessment["suspicious"]:
+            reasons = ", ".join(sparse_assessment["reasons"])
+            print(
+                "⚠️ Whisper transcript looks unusually sparse for the source; "
+                f"retrying without VAD ({reasons})",
+                flush=True,
+            )
+            if self._active_backend != "faster-whisper" or bool(result.get("vad_fallback_used")):
+                raise NoUsableSpeechError(
+                    "TRANSCRIPT_COMPLETENESS_UNCONFIRMED: Whisper returned a suspiciously sparse transcript "
+                    f"({reasons}). Inspect whisper_transcript.txt and retry with the correct source language."
+                )
+            try:
+                retry = self._transcribe_faster(
+                    str(path), vad_filter=False, media_duration=media_duration
+                )
+            except Exception as exc:
+                raise NoUsableSpeechError(
+                    "TRANSCRIPT_COMPLETENESS_UNCONFIRMED: Whisper's VAD-off completeness retry failed. "
+                    "Inspect whisper_transcript.txt, verify the source-language setting, and retry."
+                ) from exc
+            retry["media_duration"] = result["media_duration"]
+            retry["text"] = " ".join(seg["text"] for seg in retry.get("segments") or []).strip()
+            retry_assessment = self.assess_transcript_completeness(retry, media_duration)
+            original_words = int(sparse_assessment["word_count"])
+            retry_words = int(retry_assessment["word_count"])
+            retry_speech = float(retry_assessment["spoken_seconds"])
+            original_speech = float(sparse_assessment["spoken_seconds"])
+
+            if retry.get("segments") and retry_words > original_words and retry_speech > original_speech + 0.5:
+                retry_quality = self._assess_vad_fallback_quality(
+                    retry,
+                    min_unique_ratio=float(os.getenv("WHISPER_SPARSE_RETRY_MIN_UNIQUE_RATIO", "0.30")),
+                )
+                if not retry_quality["usable"]:
+                    retry_reasons = ", ".join(retry_quality["reasons"])
+                    raise NoUsableSpeechError(
+                        "TRANSCRIPT_COMPLETENESS_UNCONFIRMED: VAD-off retry found additional speech but did "
+                        f"not pass quality checks ({retry_reasons}). Inspect whisper_transcript.txt and retry."
+                    )
+                retry["transcript_validation"] = {
+                    "status": "sparse_recovered",
+                    **retry_assessment,
+                    "retry_quality": retry_quality,
+                }
+                result = retry
+                print(
+                    "✅ Whisper sparse-transcript retry recovered additional speech — "
+                    f"{retry_words} words, {retry_speech:.2f}s",
+                    flush=True,
+                )
+            elif (
+                retry.get("segments")
+                and not retry_assessment["missing_timestamps"]
+                and self._sparse_transcripts_agree(result, retry)
+            ):
+                retry["transcript_validation"] = {
+                    "status": "sparse_corroborated",
+                    **retry_assessment,
+                }
+                result = retry
+                print(
+                    "✅ VAD-on and VAD-off transcripts agree; preserving the sparse low-dialogue result",
+                    flush=True,
+                )
+            else:
+                raise NoUsableSpeechError(
+                    "TRANSCRIPT_COMPLETENESS_UNCONFIRMED: VAD-off retry did not corroborate or reliably "
+                    "recover the sparse transcript. Inspect whisper_transcript.txt and the source audio; "
+                    "then retry with the correct source language."
+                )
 
         if bool(result.get("vad_fallback_used")):
             quality = self._assess_vad_fallback_quality(result)

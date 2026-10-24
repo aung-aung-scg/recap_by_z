@@ -110,9 +110,10 @@ class OnlyEnglishToMyanmarTests(unittest.TestCase):
             "A long\ncaption with\nan\nexceptionall\nylongword",
         )
 
-    def test_smart_sync_caps_the_speed_then_trims(self):
+    def test_smart_sync_preserves_short_footage_and_slows_for_long_narration(self):
         _vf, fast = core._sync_filter(10.0, 4.0, max_video_speed=1.25)
-        self.assertAlmostEqual(fast["applied_factor"], 0.8)
+        self.assertAlmostEqual(fast["applied_factor"], 1.0)
+        self.assertAlmostEqual(fast["target_duration"], 10.0)
         _vf, slow = core._sync_filter(2.0, 3.0, max_video_speed=1.25)
         self.assertAlmostEqual(slow["applied_factor"], 1.5)
 

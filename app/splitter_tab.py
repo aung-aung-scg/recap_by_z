@@ -17,8 +17,8 @@ import splitter as sp
 from core import OUTPUT_RATIOS, output_canvas, probe_video_size
 from preview_tools import extract_preview_frame, probe_duration as preview_probe_duration
 
-BG, PANEL, FIELD, BORDER = "#0d0f14", "#151922", "#0a0c10", "#303744"
-FG, MUTED, SUCCESS = "#e7eaf0", "#9da7b6", "#55d187"
+BG, PANEL, FIELD, BORDER = "#0D1117", "#161B22", "#0B0F14", "#30363D"
+FG, MUTED, SUCCESS = "#F3F4F6", "#9CA3AF", "#22C55E"
 RATIOS = ("Original",) + tuple(r for r in OUTPUT_RATIOS if r != "Original")
 FILL_LABELS = {"blur": "Blur background", "black": "Black bars", "crop": "Crop to fill"}
 VIDEO_TYPES = [("Video", "*.mp4 *.mkv *.mov *.webm *.avi"), ("All", "*.*")]
@@ -78,6 +78,7 @@ class SplitterTab(ttk.Frame):
         self.preview_time = tk.DoubleVar(value=1.0)
         self.status = tk.StringVar(value="READY")
         self.stage = tk.StringVar(value="Add a video to start")
+        self.status.trace_add("write", lambda *_args: self._update_status_style())
 
         self._build()
         for var in (self.minutes, self.smart_cut, self.max_extra, self.text, self.text_box, self.label_on,
@@ -87,26 +88,27 @@ class SplitterTab(ttk.Frame):
 
     # ------------------------------------------------------------------ layout
     def _build(self) -> None:
-        style = ttk.Style(self)
-        style.configure("TSpinbox", fieldbackground=FIELD, foreground=FG, background=PANEL, arrowcolor=FG,
-                        bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, insertcolor=FG)
-        style.configure("Split.Treeview", background=FIELD, fieldbackground=FIELD, foreground=FG, rowheight=22,
-                        bordercolor=BORDER)
-        style.configure("Split.Treeview.Heading", background=PANEL, foreground=FG)
-        self.columnconfigure(1, weight=1)
+        palette = getattr(self.winfo_toplevel(), "palette", None)
+        colors = palette or {
+            "bg": BG, "panel": PANEL, "field": FIELD, "border": BORDER, "fg": FG,
+            "selection": "#164E63", "error": "#EF4444", "warning": "#F59E0B", "success": SUCCESS,
+        }
+        self.columnconfigure(0, weight=1, minsize=270)
+        self.columnconfigure(1, weight=3)
         self.rowconfigure(1, weight=1)
-        header = tk.Frame(self, bg=BG)
+        header = ttk.Frame(self, style="Header.TFrame", padding=(12, 8))
         header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
-        tk.Label(header, text="Splitter", bg=BG, fg=FG, font=("Segoe UI Semibold", 15)).pack(side="left")
-        tk.Label(header, text="Long video → parts of N minutes  |  Ratio + blur background  |  Text box  |  Part number",
-                 bg=BG, fg=MUTED, font=("Segoe UI", 9)).pack(side="left", padx=(14, 0), pady=(5, 0))
+        ttk.Label(header, text="Splitter", style="Title.TLabel").pack(side="left")
+        ttk.Label(header, text="Long video → parts of N minutes  |  Ratio + blur background  |  Text box  |  Part number",
+                  style="Subtitle.TLabel").pack(side="left", padx=(14, 0), pady=(5, 0))
 
         # ---------------- left: scrolling settings
-        host = ttk.LabelFrame(self, text="Videos / Settings", padding=3)
-        host.grid(row=1, column=0, sticky="nsw", padx=(0, 8))
+        host = ttk.LabelFrame(self, text="VIDEOS / SETTINGS", style="Card.TLabelframe")
+        host.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
         host.rowconfigure(0, weight=1)
-        canvas = tk.Canvas(host, bg=BG, highlightthickness=0, width=430)
-        canvas.grid(row=0, column=0, sticky="ns")
+        host.columnconfigure(0, weight=1)
+        canvas = tk.Canvas(host, bg=colors["panel"], highlightthickness=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
         bar = ttk.Scrollbar(host, orient="vertical", command=canvas.yview)
         bar.grid(row=0, column=1, sticky="ns")
         canvas.configure(yscrollcommand=bar.set)
@@ -119,10 +121,10 @@ class SplitterTab(ttk.Frame):
         def title(row: int, text: str) -> None:
             if row:
                 ttk.Separator(box).grid(row=row - 1, column=0, sticky="ew", pady=(4, 8))
-            ttk.Label(box, text=text, font=("Segoe UI Semibold", 10)).grid(row=row, column=0, sticky="w")
+            ttk.Label(box, text=text, style="PanelSection.TLabel").grid(row=row, column=0, sticky="w")
 
         def hint(row: int, text: str) -> None:
-            ttk.Label(box, text=text, style="Muted.TLabel", wraplength=400, justify="left").grid(
+            ttk.Label(box, text=text, style="Muted.TLabel", wraplength=220, justify="left").grid(
                 row=row, column=0, sticky="w", pady=(0, 4))
 
         def slider(row: int, label: str, var: tk.DoubleVar, lo: float, hi: float, fmt: Callable[[float], str]) -> None:
@@ -145,8 +147,9 @@ class SplitterTab(ttk.Frame):
         files = ttk.Frame(box)
         files.grid(row=1, column=0, sticky="ew", pady=(4, 2))
         files.columnconfigure(0, weight=1)
-        self.file_list = tk.Listbox(files, height=6, bg=FIELD, fg=FG, selectbackground="#274d8b",
-                                    highlightthickness=1, highlightbackground=BORDER, relief="flat",
+        self.file_list = tk.Listbox(files, height=6, bg=colors["field"], fg=colors["fg"],
+                                    selectbackground=colors["selection"],
+                                    highlightthickness=1, highlightbackground=colors["border"], relief="flat",
                                     activestyle="none", exportselection=False)
         self.file_list.grid(row=0, column=0, sticky="ew")
         self.file_list.bind("<<ListboxSelect>>", lambda _e: self._load_selected())
@@ -154,7 +157,7 @@ class SplitterTab(ttk.Frame):
         buttons.grid(row=2, column=0, sticky="w", pady=(4, 2))
         for text, command in (("+ Videos", self._add_files), ("+ Folder", self._add_folder),
                               ("Remove", self._remove_file), ("Clear", self._clear_files)):
-            ttk.Button(buttons, text=text, style="Compact.TButton", command=command).pack(side="left", padx=(0, 6))
+            ttk.Button(buttons, text=text, style="Compact.TButton", command=command).pack(side="left", padx=(0, 3))
         out_row = ttk.Frame(box)
         out_row.grid(row=3, column=0, sticky="ew", pady=(6, 0))
         out_row.columnconfigure(1, weight=1)
@@ -224,11 +227,13 @@ class SplitterTab(ttk.Frame):
         right.columnconfigure(0, weight=1)
         right.rowconfigure(0, weight=3)
         right.rowconfigure(2, weight=1)
-        pv = ttk.LabelFrame(right, text="Preview — drag the text box / part number", padding=6)
+        pv = ttk.LabelFrame(right, text="PREVIEW  ·  Drag text / part number", style="Card.TLabelframe")
         pv.grid(row=0, column=0, sticky="nsew")
         pv.columnconfigure(0, weight=1)
         pv.rowconfigure(0, weight=1)
-        self.canvas = tk.Canvas(pv, bg="#05070a", highlightthickness=1, highlightbackground=BORDER, cursor="fleur")
+        self.canvas = tk.Canvas(
+            pv, bg="#080B10", highlightthickness=1, highlightbackground=colors["border"], cursor="fleur",
+        )
         self.canvas.grid(row=0, column=0, sticky="nsew")
         self.canvas.bind("<ButtonPress-1>", self._press)
         self.canvas.bind("<B1-Motion>", self._motion)
@@ -249,18 +254,23 @@ class SplitterTab(ttk.Frame):
         bottom.columnconfigure(0, weight=3)
         bottom.columnconfigure(1, weight=2)
         bottom.rowconfigure(0, weight=1)
-        parts = ttk.LabelFrame(bottom, text="Parts (Check cuts / START)", padding=6)
+        parts = ttk.LabelFrame(bottom, text="PARTS", style="Card.TLabelframe")
         parts.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         parts.columnconfigure(0, weight=1)
         parts.rowconfigure(0, weight=1)
-        log_frame = ttk.LabelFrame(bottom, text="Log", padding=6)
+        log_frame = ttk.LabelFrame(bottom, text="SPLITTER LOG", style="Card.TLabelframe")
         log_frame.grid(row=0, column=1, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
-        self.logbox = tk.Text(log_frame, height=8, width=40, wrap="word", bg="#080a0e", fg="#d9dee8",
-                              relief="flat", borderwidth=0, padx=6, pady=6, font=("Consolas", 9),
-                              insertbackground=FG)
+        self.logbox = tk.Text(
+            log_frame, height=8, width=40, wrap="word", bg=colors["field"], fg=colors["fg"],
+            relief="flat", borderwidth=0, padx=8, pady=8, font=("Consolas", 9),
+            insertbackground=colors["fg"], selectbackground=colors["selection"],
+        )
         self.logbox.grid(row=0, column=0, sticky="nsew")
+        self.logbox.tag_configure("error", foreground=colors["error"])
+        self.logbox.tag_configure("warning", foreground=colors["warning"])
+        self.logbox.tag_configure("success", foreground=colors["success"])
         log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.logbox.yview)
         log_scroll.grid(row=0, column=1, sticky="ns")
         self.logbox.configure(yscrollcommand=log_scroll.set)
@@ -268,8 +278,8 @@ class SplitterTab(ttk.Frame):
                                        style="Split.Treeview")
         self.parts_view.heading("#0", text="Part")
         self.parts_view.column("#0", width=70, stretch=False)
-        for col, text, width in (("start", "Start", 80), ("end", "End", 80), ("length", "Length", 80),
-                                 ("cut", "Cut at", 100)):
+        for col, text, width in (("start", "Start", 62), ("end", "End", 62), ("length", "Length", 62),
+                                 ("cut", "Cut at", 74)):
             self.parts_view.heading(col, text=text)
             self.parts_view.column(col, width=width, anchor="center")
         self.parts_view.grid(row=0, column=0, sticky="nsew")
@@ -288,10 +298,29 @@ class SplitterTab(ttk.Frame):
         self.stop_btn.pack(side="left", padx=8)
         ttk.Button(btns, text="Open Output Folder", command=self._open_output).pack(side="left")
         ttk.Label(btns, textvariable=self.stage, style="Muted.TLabel").pack(side="right", padx=(8, 0))
-        ttk.Label(btns, textvariable=self.status, style="Status.TLabel").pack(side="right")
+        self.status_label = ttk.Label(btns, textvariable=self.status, style="Status.TLabel")
+        self.status_label.pack(side="right")
         self.progress = ttk.Progressbar(controls, mode="determinate", maximum=100)
         self.progress.grid(row=1, column=0, sticky="ew")
         self._frame_changed(refresh=False)
+        self._update_status_style()
+
+    def _update_status_style(self) -> None:
+        label = getattr(self, "status_label", None)
+        if label is None:
+            return
+        palette = getattr(self.winfo_toplevel(), "palette", None) or {
+            "success": SUCCESS, "error": "#EF4444", "warning": "#F59E0B", "muted": MUTED, "accent": "#38BDF8",
+        }
+        text = self.status.get().upper()
+        foreground = (palette["error"] if "ERROR" in text or "FAIL" in text else
+                      palette["warning"] if "STOP" in text else
+                      palette["success"] if "DONE" in text or "COMPLETE" in text else
+                      palette["muted"] if text == "READY" else palette["accent"])
+        style = ttk.Style(self)
+        style.configure("SplitStatus.TLabel", background=palette.get("panel", PANEL), foreground=foreground,
+                        font=("Segoe UI Semibold", 10), padding=(8, 3))
+        label.configure(style="SplitStatus.TLabel")
 
     @staticmethod
     def _wheel(widget: tk.Misc, canvas: tk.Canvas) -> None:
@@ -526,7 +555,12 @@ class SplitterTab(ttk.Frame):
             while True:
                 kind, payload = self.msgq.get_nowait()
                 if kind == "log":
-                    self.logbox.insert("end", str(payload) + "\n")
+                    text = str(payload)
+                    upper = text.upper()
+                    tag = "error" if "❌" in text or "ERROR" in upper or "FAILED" in upper else (
+                        "warning" if "⚠" in text else "success" if "✅" in text else "info"
+                    )
+                    self.logbox.insert("end", text + "\n", tag)
                     self.logbox.see("end")
                 elif kind == "progress":
                     value, label = payload

@@ -15,5 +15,6 @@ faster-whisper==1.2.1       # local Whisper for the English narration (NVIDIA GP
 av==18.0.0                  # audio reader of faster-whisper 1.2.1; av 19 removed open(metadata_errors=) and broke it
 numpy==2.2.6                # Short pauses + audio helpers
 pillow==12.3.0              # overlays, preview
+tkinterdnd2>=0.4.2           # drag-and-drop source video into the Recap preview
 requests==2.32.3
 playwright==1.62.0          # Myanmar text renderer (Chromium)

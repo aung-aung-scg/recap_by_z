@@ -605,6 +605,70 @@ def _pathological_repetition_segment_ids(transcript: dict[str, Any]) -> set[int]
     return bad
 
 
+def _misaligned_repeated_segment_ids(transcript: dict[str, Any]) -> set[int]:
+    """Find repeated Whisper lines whose word timestamps cover less than half their text."""
+    if "whisper" not in str(transcript.get("backend") or "").lower():
+        return set()
+
+    bad: set[int] = set()
+    recent_lines: list[str] = []
+    for index, seg in enumerate(transcript.get("segments") or []):
+        if not isinstance(seg, dict):
+            continue
+        text = re.sub(r"[\W_]+", " ", _clean(seg.get("text")).casefold()).strip()
+        words = text.split()
+        if len(words) < 3:
+            continue
+
+        if text in recent_lines:
+            word_timings = seg.get("words")
+            if isinstance(word_timings, list) and word_timings:
+                valid_timings = 0
+                for word in word_timings:
+                    if not isinstance(word, dict):
+                        continue
+                    try:
+                        if float(word["end"]) > float(word["start"]):
+                            valid_timings += 1
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                if valid_timings * 2 < len(words):
+                    try:
+                        bad.add(int(seg.get("id", index)))
+                    except (TypeError, ValueError):
+                        bad.add(index)
+
+        recent_lines.append(text)
+        if len(recent_lines) > 5:
+            recent_lines.pop(0)
+    return bad
+
+
+def _without_misaligned_repeated_segments(
+    transcript: dict[str, Any],
+) -> tuple[dict[str, Any], set[int]]:
+    """Keep raw transcript artifacts on disk but exclude repeated, poorly aligned lines from planning."""
+    bad_ids = _misaligned_repeated_segment_ids(transcript)
+    if not bad_ids:
+        return transcript, bad_ids
+
+    segments = []
+    for index, seg in enumerate(transcript.get("segments") or []):
+        if not isinstance(seg, dict):
+            continue
+        try:
+            segment_id = int(seg.get("id", index))
+        except (TypeError, ValueError):
+            segment_id = index
+        if segment_id not in bad_ids:
+            segments.append(seg)
+
+    filtered = dict(transcript)
+    filtered["segments"] = segments
+    filtered["text"] = " ".join(str(seg.get("text") or "") for seg in segments).strip()
+    return filtered, bad_ids
+
+
 def _unit_is_low_information_repetition(unit: dict[str, Any]) -> bool:
     text = _clean(unit.get("source_text"))
     chars = [ch.casefold() for ch in text if ch.isalnum()]
@@ -686,6 +750,7 @@ def _filter_local_whisper_artifact_units(
     hallucination rows are simply ignored.
     """
     pathological_ids = _pathological_repetition_segment_ids(transcript)
+    misaligned_repeated_ids = _misaligned_repeated_segment_ids(transcript)
     kept: list[dict[str, Any]] = []
     dropped: list[tuple[int, str]] = []
     for unit in units:
@@ -695,6 +760,9 @@ def _filter_local_whisper_artifact_units(
             dropped.append((uid, "punctuation-only source"))
             continue
         source_ids = {int(value) for value in (unit.get("source_transcript_ids") or [unit.get("source_transcript_id", -1)])}
+        if source_ids and source_ids.issubset(misaligned_repeated_ids):
+            dropped.append((uid, "repeated Whisper text has incomplete word alignment"))
+            continue
         if source_ids and source_ids.issubset(pathological_ids) and _unit_is_low_information_repetition(unit):
             dropped.append((uid, "Whisper repetition hallucination"))
             continue
@@ -722,6 +790,35 @@ def _plan_has_speakable_narration(plan: Any) -> bool:
         isinstance(seg, dict) and _has_speakable_content(seg.get("narration"))
         for seg in segments
     )
+
+
+def _plan_has_unverified_sparse_transcript(plan: Any) -> bool:
+    if not isinstance(plan, dict):
+        return False
+    validation = plan.get("transcript_validation") or {}
+    if validation.get("status") in {"sparse_recovered", "sparse_corroborated"}:
+        return False
+    try:
+        duration = float(plan.get("source_duration") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if duration < 60.0:
+        return False
+
+    segments = [seg for seg in plan.get("segments") or [] if isinstance(seg, dict)]
+    source_text = " ".join(str(seg.get("source_text") or "") for seg in segments)
+    word_count = sum(1 for word in source_text.split() if any(char.isalnum() for char in word))
+    text_characters = sum(char.isalnum() for char in source_text)
+    spoken_seconds = 0.0
+    for segment in segments:
+        try:
+            start = float(segment["gemini_start"])
+            end = float(segment["gemini_end"])
+        except (KeyError, TypeError, ValueError):
+            return True
+        if end > start:
+            spoken_seconds += end - start
+    return word_count < 8 and text_characters < 32 and spoken_seconds < 3.0
 
 
 _COMMON_ABBREVIATIONS = {
@@ -1631,6 +1728,7 @@ def make_translation_plan(units: list[dict[str, Any]], video_duration: float, *,
         "transcript_backend": transcript.get("backend", ""),
         "transcript_model": transcript.get("model", ""),
         "transcript_language": transcript.get("language", ""),
+        "transcript_validation": transcript.get("transcript_validation") or {"status": "unverified"},
         "story_context": story_context,
         "segments": segments,
     }
@@ -1811,9 +1909,15 @@ class RecapPlanBuilder:
                     and str(plan.get("boundary_profile") or "") == BOUNDARY_PROFILE
                 ):
                     if _plan_has_speakable_narration(plan):
-                        self.log("♻️ Timestamp transcript + Translation plan reuse")
-                        self.progress(4, 4, "Plan reused")
-                        return plan_file, plan
+                        if _plan_has_unverified_sparse_transcript(plan):
+                            self.log(
+                                "⚠️ Cached plan has a very short transcript for a long source without a "
+                                "completeness check; rebuilding it before TTS."
+                            )
+                        else:
+                            self.log("♻️ Timestamp transcript + Translation plan reuse")
+                            self.progress(4, 4, "Plan reused")
+                            return plan_file, plan
                     self.log("⚠️ Cached Smart Sync plan contains non-speech/placeholder narration; rebuilding translation from safe checkpoint")
             except Exception:
                 pass
@@ -1876,10 +1980,22 @@ class RecapPlanBuilder:
                         and candidate.get("model") == whisper_model
                         and str(candidate.get("language") or "").lower().startswith(whisper_language.lower())
                     ):
-                        transcript = candidate
-                        if not transcript_text_file.is_file():
-                            transcript_text_file.write_text(str(transcript.get("text") or ""), encoding="utf-8")
-                        self.log("♻️ Full local Whisper transcript reuse")
+                        assessment = whisper_mod.WhisperTimestampService.assess_transcript_completeness(
+                            candidate, duration
+                        )
+                        validation = candidate.get("transcript_validation") or {}
+                        if assessment["suspicious"] and validation.get("status") not in {
+                            "sparse_recovered", "sparse_corroborated"
+                        }:
+                            self.log(
+                                "⚠️ Cached Whisper transcript is unusually sparse and has no completeness "
+                                "confirmation; re-running Whisper validation."
+                            )
+                        else:
+                            transcript = candidate
+                            if not transcript_text_file.is_file():
+                                transcript_text_file.write_text(str(transcript.get("text") or ""), encoding="utf-8")
+                            self.log("♻️ Full local Whisper transcript reuse")
             except Exception:
                 transcript = None
 
@@ -1909,12 +2025,20 @@ class RecapPlanBuilder:
             self.log(f"📝 Raw transcript: {transcript_text_file.name}")
             self._release_whisper_gpu(whisper)
 
-        _check_heard_speech(transcript, transcript_text_file.name, language_name)   # before any Gemini request
+        planning_transcript, repeated_artifact_ids = _without_misaligned_repeated_segments(transcript)
+        if repeated_artifact_ids:
+            preview = ", ".join(str(value) for value in sorted(repeated_artifact_ids)[:10])
+            suffix = "..." if len(repeated_artifact_ids) > 10 else ""
+            self.log(
+                f"⚠️ Ignoring {len(repeated_artifact_ids)} repeated Whisper segment(s) with incomplete "
+                f"word alignment: {preview}{suffix}. The raw transcript remains available for review."
+            )
+        _check_heard_speech(planning_transcript, transcript_text_file.name, language_name)   # before any Gemini request
         self.log("✅ Narrator source: all transcript speech kept; original V2 Smart Sync boundaries")
         self.log("✂️ Lines: whole sentences (a line ends at a sentence end)" if sentence_lines else
                  "✂️ Lines: 4-6 s (this job was started that way; a new job uses whole sentences)")
         units = atomicize_timestamp_segments(
-            transcript,
+            planning_transcript,
             max_duration=self.atomic_max_duration,
             target_duration=self.atomic_target_duration,
             sentence_locked=sentence_lines,
