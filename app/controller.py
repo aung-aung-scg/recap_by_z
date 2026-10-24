@@ -26,6 +26,7 @@ from core import FRAME_FILLS, OUTPUT_RATIOS, normalize_segments, output_canvas, 
 from preview_tools import probe_duration as preview_probe_duration, extract_preview_frame, scale_logo_preview
 from narration_editor import NarrationEditor, failed_segment_from_error
 from splitter_tab import SplitterTab
+from subtitle_translator_tab import SubtitleTranslatorTab
 from recap_planner import SOURCE_LANGUAGES
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -229,7 +230,7 @@ class ToolTip:
 class App(TkinterDnD.Tk if TkinterDnD is not None else tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Recap → Myanmar — Narrator · Edge TTS · Smart Sync  |  Splitter")
+        self.title("Recap → Myanmar — Narrator · Edge TTS · Smart Sync  |  Splitter  |  Subtitle Translator")
         self.geometry("1580x900")
         self.minsize(1100, 660)
         try:
@@ -527,6 +528,8 @@ class App(TkinterDnD.Tk if TkinterDnD is not None else tk.Tk):
         self._update_status_style()
         if hasattr(self, "splitter_tab"):
             self.splitter_tab._update_status_style()
+        if hasattr(self, "subtitle_tab"):
+            self.subtitle_tab.set_palette(self.palette)
         for tooltip in self._tooltips:
             tooltip.set_palette(self.palette)
 
@@ -649,8 +652,18 @@ class App(TkinterDnD.Tk if TkinterDnD is not None else tk.Tk):
         self.splitter_tab = SplitterTab(self.tools_tabs, cfg=self.cfg, save=lambda: save_config(self.cfg),
                                         tool=lambda name: _tool_path(self.cfg, name), logs_dir=LOGS_DIR)
         self.tools_tabs.add(self.splitter_tab, text="Splitter")
-        if self.cfg.get("last_tool_tab") == "splitter":
+        self.subtitle_tab = SubtitleTranslatorTab(
+            self.tools_tabs,
+            cfg=self.cfg,
+            save=lambda: save_config(self.cfg),
+            tool=lambda name: _tool_path(self.cfg, name),
+        )
+        self.tools_tabs.add(self.subtitle_tab, text="Subtitle Translator")
+        last_tool_tab = self.cfg.get("last_tool_tab")
+        if last_tool_tab == "splitter":
             self.tools_tabs.select(self.splitter_tab)
+        elif last_tool_tab == "subtitle_translator":
+            self.tools_tabs.select(self.subtitle_tab)
         outer = ttk.Frame(recap_tab, padding=(14, 10, 14, 10), style="Page.TFrame")
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
@@ -1109,8 +1122,15 @@ class App(TkinterDnD.Tk if TkinterDnD is not None else tk.Tk):
     def _on_close(self) -> None:
         self._save_pane_layout()
         self.splitter_tab.shutdown()
+        self.subtitle_tab.shutdown()
         try:
-            self.cfg["last_tool_tab"] = "splitter" if self.tools_tabs.select() == str(self.splitter_tab) else "recap"
+            selected = self.tools_tabs.select()
+            if selected == str(self.splitter_tab):
+                self.cfg["last_tool_tab"] = "splitter"
+            elif selected == str(self.subtitle_tab):
+                self.cfg["last_tool_tab"] = "subtitle_translator"
+            else:
+                self.cfg["last_tool_tab"] = "recap"
             save_config(self.cfg)
         except Exception:
             pass

@@ -3,10 +3,15 @@
 **English၊ တရုတ်၊ ဟိန္ဒီ၊ ကိုရီးယား … ဘယ်ဘာသာနဲ့ ပြောထားတဲ့ recap / ဇာတ်လမ်းပြော video ကိုမဆို မြန်မာအသံနဲ့ ပြန်ထုတ်ပေးတဲ့ Windows tool**
 Narrator only · Whisper + Gemini · Microsoft Edge TTS (Myanmar) · Smart Sync
 **Splitter** tab — ရှည်တဲ့ video ကို မိနစ်အလိုက် အပိုင်းခွဲ (Ratio + blur နောက်ခံ၊ စာ၊ Part နံပါတ်)
+**Subtitle Translator** tab — video အသံကို စာသားပြောင်း၊ မြန်မာလို ဘာသာပြန်၊ ပြင်ပြီး စာတန်းထိုးကို video ထဲ တိုက်ရိုက်ထည့်ပေးတယ်။ မူရင်းအသံကို မပြင်ပါ။
 
 > English: turns a recap/story video narrated in English, Chinese, Hindi, Korean … (detected by itself)
 > into the same video narrated in Myanmar (Burmese). The Myanmar voice leads, and the picture of every
 > line is re-timed to it ("Smart Sync"). A second tab, **Splitter**, cuts long videos into parts.
+> **Subtitle Translator** is separate: transcribe video speech with Whisper, or load SRT/VTT / an embedded
+> subtitle track; translate and edit the timestamped Burmese text, then export a new video with shaped Burmese
+> subtitles burned in. SRT/VTT sources can be paired with a separately selected video. The video is re-encoded,
+> while the original audio stream is copied unchanged.
 > See the [English section](#english) below.
 
 ---
@@ -195,12 +200,18 @@ app/
   preview_tools.py         Preview frame / logo
   splitter.py              Splitter: ဘယ်မှာ ဖြတ်မလဲ (smart cut)၊ အပိုင်း render
   splitter_tab.py          Splitter tab UI
+  subtitle_io.py           SRT/VTT parsing and embedded subtitle extraction
+  subtitle_translate.py    Gemini subtitle translation, batching and cue validation
+  subtitle_transcription.py Temporary audio extraction and isolated Recap Whisper transcription
+  subtitle_video_export.py Myanmar subtitle image overlay and video/audio-preserving export
+  subtitle_cue_editor.py   Timestamp-preserving Burmese segment editor
+  subtitle_translator_tab.py Subtitle Translator tab UI
   launch.ps1               Python ရှာပြီး UI ဖွင့်တာ
 recap_runtime/services/
   whisper_service.py       faster-whisper (GPU / CPU)
   ai_service.py            Gemini client (proxy option)
 services/
-  text_overlay_service.py  မြန်မာ title စာကို Chromium နဲ့ ပုံထုတ်တာ
+  text_overlay_service.py  Chromium-based Myanmar text and subtitle image rendering
 tests/                     python -m unittest discover -s tests
 ```
 

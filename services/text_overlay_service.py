@@ -167,6 +167,7 @@ def _render_browser_text_png(
     padding_y: int,
     stroke_px: float,
     font_weight: int = 400,
+    browser=None,
 ) -> Path:
     """Render Myanmar with the exact Recap-style Chromium shaping path.
 
@@ -255,16 +256,27 @@ body {{ display:flex; align-items:center; justify-content:center; }}
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with sync_playwright() as p:
-        browser, browser_label = _launch_browser(p)
+    def capture(active_browser) -> None:
+        page = active_browser.new_page(
+            viewport={"width": int(width), "height": int(height)}, device_scale_factor=1,
+        )
         try:
-            page = browser.new_page(viewport={"width": int(width), "height": int(height)}, device_scale_factor=1)
             page.set_content(markup, wait_until="load")
             page.wait_for_function("document.documentElement.dataset.renderReady === '1'", timeout=10_000)
             page.wait_for_timeout(80)
             page.screenshot(path=str(out_path), omit_background=True)
         finally:
-            browser.close()
+            page.close()
+
+    if browser is None:
+        with sync_playwright() as p:
+            active_browser, _browser_label = _launch_browser(p)
+            try:
+                capture(active_browser)
+            finally:
+                active_browser.close()
+    else:
+        capture(browser)
 
     if not out_path.is_file() or out_path.stat().st_size < 500:
         raise RuntimeError(f"Browser Myanmar PNG render failed: {out_path}")
@@ -290,6 +302,61 @@ def make_video_title_png(title: str, out_path: Path, cfg: dict) -> Path:
         stroke_px=float(cfg.get("stroke_px", 1.6)),
         font_weight=int(cfg.get("font_weight", 400)),
     )
+
+
+def make_video_subtitle_pngs(
+    texts: list[str],
+    output_dir: Path,
+    cfg: dict,
+    *,
+    stop_event=None,
+    progress=None,
+) -> list[Path]:
+    """Render timed Myanmar subtitle cards in one Chromium session."""
+    if not texts:
+        return []
+    if sync_playwright is None:
+        raise RuntimeError(
+            "Playwright is required for Unicode-safe Myanmar rendering. "
+            "Install with: python -m pip install playwright"
+        )
+    font_path = find_mm_font()
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    width = int(cfg["panel_width"])
+    height = int(cfg["video_title_panel_height"])
+    font_size = int(cfg["font_size"])
+    outputs = [output_dir / f"subtitle_{index:06d}.png" for index in range(1, len(texts) + 1)]
+
+    with sync_playwright() as p:
+        browser, _browser_label = _launch_browser(p)
+        try:
+            for index, (text, output) in enumerate(zip(texts, outputs), 1):
+                if stop_event is not None and stop_event.is_set():
+                    raise InterruptedError("Myanmar subtitle rendering cancelled")
+                _render_browser_text_png(
+                    text=text,
+                    out_path=output,
+                    width=width,
+                    height=height,
+                    font_path=font_path,
+                    font_size=font_size,
+                    min_font_size=int(cfg.get("min_title_font_size", font_size)),
+                    max_lines=int(cfg.get("max_title_lines", 3)),
+                    single_line=False,
+                    bg_alpha=float(cfg.get("panel_bg_alpha", 0.72)),
+                    radius=int(cfg.get("panel_radius", 24)),
+                    padding_x=int(cfg.get("title_horizontal_padding", 28)),
+                    padding_y=int(cfg.get("title_vertical_padding", 14)),
+                    stroke_px=float(cfg.get("stroke_px", 1.8)),
+                    font_weight=int(cfg.get("font_weight", 700)),
+                    browser=browser,
+                )
+                if progress:
+                    progress(index, len(texts), f"Rendering subtitle image {index}/{len(texts)}")
+        finally:
+            browser.close()
+    return outputs
 
 
 def make_video_part_png(part_index: int, part_count: int, out_path: Path, cfg: dict) -> Path:

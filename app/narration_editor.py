@@ -16,6 +16,7 @@ from tkinter import messagebox, ttk
 
 from core import normalize_segments, segment_basename
 from recap_planner import _foreign_letters, _latin_words, _note_text
+from subtitle_text_widgets import NativeTextBox
 
 _FAILED_SEGMENT_RE = re.compile(r"FAILED at segment\s+(\d+)", re.IGNORECASE)
 _MIXED_DIGITS_RE = re.compile(r"[၀-၉][0-9]|[0-9][၀-၉]")
@@ -45,102 +46,6 @@ def _atomic_write_json(path: Path, data: Any) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, path)
-
-
-def _colorref(color: str) -> int:
-    color = color.lstrip("#")
-    r, g, b = int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16)
-    return r | (g << 8) | (b << 16)
-
-
-class NativeTextBox:
-    """A Windows RichEdit box inside a Tk frame, for typing Burmese.
-
-    Tk's own Text widget measures every Myanmar letter on its own (ြ and ေ get overlapping
-    boxes), so its caret and mouse clicks land in the wrong place and typing in the middle
-    of a word goes wrong. RichEdit (the WordPad engine) shapes Myanmar like Notepad does.
-    Plain-text mode, dark colours, Ctrl+Z / Ctrl+A / copy / paste are native.
-    """
-
-    WS_CHILD, WS_VISIBLE, WS_VSCROLL, WS_CLIPCHILDREN = 0x40000000, 0x10000000, 0x00200000, 0x02000000
-    ES_MULTILINE, ES_AUTOVSCROLL, ES_NOHIDESEL, ES_WANTRETURN = 0x0004, 0x0040, 0x0100, 0x1000
-    EM_SETBKGNDCOLOR, EM_SETCHARFORMAT, EM_SETTEXTMODE = 0x0443, 0x0444, 0x0459
-    EM_EMPTYUNDOBUFFER, EM_SETMARGINS = 0x00CD, 0x00D3
-    GWL_STYLE = -16
-
-    def __init__(self, frame: tk.Frame, *, font: str, size_pt: int, bg: str, fg: str) -> None:
-        import ctypes
-        from ctypes import wintypes
-
-        class CHARFORMAT2W(ctypes.Structure):
-            _fields_ = [("cbSize", wintypes.UINT), ("dwMask", wintypes.DWORD), ("dwEffects", wintypes.DWORD),
-                        ("yHeight", wintypes.LONG), ("yOffset", wintypes.LONG), ("crTextColor", wintypes.DWORD),
-                        ("bCharSet", wintypes.BYTE), ("bPitchAndFamily", wintypes.BYTE),
-                        ("szFaceName", wintypes.WCHAR * 32), ("wWeight", wintypes.WORD), ("sSpacing", ctypes.c_short),
-                        ("crBackColor", wintypes.DWORD), ("lcid", wintypes.DWORD), ("dwReserved", wintypes.DWORD),
-                        ("sStyle", ctypes.c_short), ("wKerning", wintypes.WORD), ("bUnderlineType", wintypes.BYTE),
-                        ("bAnimation", wintypes.BYTE), ("bRevAuthor", wintypes.BYTE), ("bUnderlineColor", wintypes.BYTE)]
-
-        self.frame = frame
-        self.user32 = ctypes.WinDLL("user32", use_last_error=True)
-        ctypes.WinDLL("Msftedit.dll")  # registers the RICHEDIT50W window class
-        u = self.user32
-        u.CreateWindowExW.restype = wintypes.HWND
-        u.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
-                                      ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-                                      wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]
-        u.SendMessageW.restype = ctypes.c_ssize_t
-        u.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, ctypes.c_size_t, ctypes.c_ssize_t]
-        u.SetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPCWSTR]
-        u.GetWindowTextLengthW.argtypes = [wintypes.HWND]
-        u.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-        u.MoveWindow.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.BOOL]
-        u.SetFocus.argtypes = [wintypes.HWND]
-        u.DestroyWindow.argtypes = [wintypes.HWND]
-        u.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
-        u.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.LONG]
-
-        frame.update_idletasks()
-        parent = wintypes.HWND(frame.winfo_id())
-        u.SetWindowLongW(parent, self.GWL_STYLE, u.GetWindowLongW(parent, self.GWL_STYLE) | self.WS_CLIPCHILDREN)
-        style = (self.WS_CHILD | self.WS_VISIBLE | self.WS_VSCROLL | self.ES_MULTILINE | self.ES_AUTOVSCROLL
-                 | self.ES_NOHIDESEL | self.ES_WANTRETURN)
-        self.hwnd = u.CreateWindowExW(0, "RICHEDIT50W", "", style, 0, 0, max(50, frame.winfo_width()),
-                                      max(50, frame.winfo_height()), parent, None, None, None)
-        if not self.hwnd:
-            raise OSError(f"RichEdit could not be created (error {ctypes.get_last_error()})")
-        u.SendMessageW(self.hwnd, self.EM_SETTEXTMODE, 1, 0)  # TM_PLAINTEXT: pasted text loses its formatting
-        u.SendMessageW(self.hwnd, self.EM_SETBKGNDCOLOR, 0, _colorref(bg))
-        fmt = CHARFORMAT2W()
-        fmt.cbSize = ctypes.sizeof(CHARFORMAT2W)
-        fmt.dwMask = 0x40000000 | 0x20000000 | 0x80000000  # CFM_COLOR | CFM_FACE | CFM_SIZE
-        fmt.crTextColor = _colorref(fg)
-        fmt.yHeight = int(size_pt) * 20  # twips
-        fmt.szFaceName = font
-        for scope in (0, 4):  # SCF_DEFAULT (what is typed next) and SCF_ALL
-            u.SendMessageW(self.hwnd, self.EM_SETCHARFORMAT, scope, ctypes.addressof(fmt))
-        u.SendMessageW(self.hwnd, self.EM_SETMARGINS, 0x1 | 0x2, (10 << 16) | 10)
-        self._fmt = fmt
-        frame.bind("<Configure>", self._resize, add="+")
-
-    def _resize(self, event) -> None:
-        self.user32.MoveWindow(self.hwnd, 0, 0, int(event.width), int(event.height), True)
-
-    def get(self) -> str:
-        import ctypes
-        length = self.user32.GetWindowTextLengthW(self.hwnd)
-        buffer = ctypes.create_unicode_buffer(length + 1)
-        self.user32.GetWindowTextW(self.hwnd, buffer, length + 1)
-        return buffer.value
-
-    def set(self, text: str) -> None:
-        import ctypes
-        self.user32.SetWindowTextW(self.hwnd, str(text))
-        self.user32.SendMessageW(self.hwnd, self.EM_SETCHARFORMAT, 4, ctypes.addressof(self._fmt))
-        self.user32.SendMessageW(self.hwnd, self.EM_EMPTYUNDOBUFFER, 0, 0)
-
-    def focus(self) -> None:
-        self.user32.SetFocus(self.hwnd)
 
 
 class NarrationEditor(tk.Toplevel):
