@@ -11,7 +11,9 @@ Narrator only · Whisper + Gemini · Microsoft Edge TTS (Myanmar) · Smart Sync
 > **Subtitle Translator** is separate: transcribe video speech with Whisper, or load SRT/VTT / an embedded
 > subtitle track; translate and edit the timestamped Burmese text, then export a new video with shaped Burmese
 > subtitles burned in. SRT/VTT sources can be paired with a separately selected video. The video is re-encoded,
-> while the original audio stream is copied unchanged.
+> while the original audio stream is copied unchanged. By default, an opaque full-width bar hides source
+> captions for the entire video, including gaps between translated cues. The cover position and height are
+> adjustable in the preview; Blur and Fill (delogo) can instead target a user-drawn area, or choose None.
 > See the [English section](#english) below.
 
 ---

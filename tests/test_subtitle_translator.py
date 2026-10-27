@@ -21,6 +21,7 @@ import subtitle_io  # noqa: E402
 import subtitle_editing  # noqa: E402
 import subtitle_translate  # noqa: E402
 import subtitle_transcription  # noqa: E402
+import subtitle_translator_tab  # noqa: E402
 import subtitle_video_export  # noqa: E402
 
 
@@ -269,6 +270,43 @@ class SubtitleEditingTests(unittest.TestCase):
             subtitle_editing.validate_cue_sequence(modified_source, self.gemini)
 
 
+class SubtitlePreviewSizingTests(unittest.TestCase):
+    def test_fit_preserves_portrait_and_landscape_aspect_ratios_in_wide_and_narrow_areas(self):
+        cases = (
+            ((1080, 1920), (480, 270), (152, 270)),
+            ((1080, 1920), (120, 600), (120, 213)),
+            ((1920, 1080), (1000, 400), (711, 400)),
+            ((1920, 1080), (300, 900), (300, 169)),
+        )
+        for frame_size, area_size, expected in cases:
+            with self.subTest(frame_size=frame_size, area_size=area_size):
+                fitted = subtitle_translator_tab.fit_preview_size(frame_size, area_size)
+                self.assertEqual(fitted, expected)
+                self.assertLessEqual(fitted[0], area_size[0])
+                self.assertLessEqual(fitted[1], area_size[1])
+                self.assertAlmostEqual(
+                    fitted[0] / fitted[1],
+                    frame_size[0] / frame_size[1],
+                    delta=0.01,
+                )
+
+    def test_fit_handles_tiny_areas_and_rejects_invalid_frames(self):
+        self.assertEqual(
+            subtitle_translator_tab.fit_preview_size((1920, 1080), (2, 1)),
+            (2, 1),
+        )
+        self.assertEqual(
+            subtitle_translator_tab.fit_preview_size((1080, 1920), (1, 1)),
+            (1, 1),
+        )
+        self.assertEqual(
+            subtitle_translator_tab.fit_preview_size((1080, 1920), (0, 0)),
+            (1, 1),
+        )
+        with self.assertRaisesRegex(ValueError, "dimensions must be positive"):
+            subtitle_translator_tab.fit_preview_size((0, 1920), (480, 270))
+
+
 class SubtitleVideoWorkflowTests(unittest.TestCase):
     def test_whisper_worker_logging_survives_cp932_default_encoding(self):
         worker = APP / "subtitle_transcription.py"
@@ -350,7 +388,73 @@ class SubtitleVideoWorkflowTests(unittest.TestCase):
         self.assertEqual(command[command.index("-c:a") + 1], "copy")
         self.assertEqual(command[command.index("-c:v") + 1], "libx264")
         self.assertNotIn("-an", command)
-        self.assertIn("between(t\\,1.250\\,3.500)", command[command.index("-filter_complex") + 1])
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertIn("drawbox=x=0", graph)
+        self.assertNotIn("enable=", graph.split(";")[0])
+        self.assertIn("between(t\\,1.250\\,3.500)", graph)
+
+    def test_hide_original_subtitles_defaults_to_enabled_solid_cover(self):
+        source = (APP / "subtitle_translator_tab.py").read_text(encoding="utf-8")
+        self.assertIn('self.settings.get("hide_original_subtitles", True)', source)
+        self.assertIn('self.settings.get("cover_style", "solid")', source)
+
+    def test_solid_cover_is_unrestricted_burmese_overlay_is_timed_and_audio_is_copied(self):
+        cue = subtitle_io.SubtitleCue(1, 1250, 3500, "Original")
+        translated = [subtitle_io.TranslatedCue(cue, "မြန်မာစာ")]
+        command = subtitle_video_export.make_ffmpeg_export_command(
+            "ffmpeg", Path("source.mp4"), Path("out.mp4"), translated,
+            [Path("subtitle.png")], (1920, 1080), 86,
+            cover_original=True, cover_style="solid", min_box_height_percent=18,
+        )
+        graph = command[command.index("-filter_complex") + 1]
+        cover_filter, subtitle_filter = graph.split(";")[:2]
+        self.assertIn("drawbox=x=0", cover_filter)
+        self.assertIn(":w=iw:h=194:color=black:t=fill", cover_filter)
+        self.assertNotIn("enable=", cover_filter)
+        self.assertIn("enable='between(t\\,1.250\\,3.500)'", subtitle_filter)
+        self.assertEqual(command[command.index("-map", command.index("-map") + 1) + 1], "0:a?")
+        self.assertEqual(command[command.index("-c:a") + 1], "copy")
+        self.assertNotIn("-an", command)
+
+    def test_cover_style_options_include_blur_fill_and_none(self):
+        cue = subtitle_io.SubtitleCue(1, 1000, 3000, "Original")
+        translated = [subtitle_io.TranslatedCue(cue, "မြန်မာစာ")]
+        for style, expected_filter in (("blur", "boxblur="), ("delogo", "delogo=")):
+            with self.subTest(style=style):
+                command = subtitle_video_export.make_ffmpeg_export_command(
+                    "ffmpeg", Path("source.mp4"), Path("out.mp4"), translated,
+                    [Path("subtitle.png")], (1920, 1080), 86,
+                    cover_style=style, blur_box={"x": .1, "y": .8, "w": .8, "h": .15},
+                )
+                self.assertIn(expected_filter, command[command.index("-filter_complex") + 1])
+        none_command = subtitle_video_export.make_ffmpeg_export_command(
+            "ffmpeg", Path("source.mp4"), Path("out.mp4"), translated,
+            [Path("subtitle.png")], (1920, 1080), 86, cover_style="none",
+        )
+        self.assertNotIn("drawbox=", none_command[none_command.index("-filter_complex") + 1])
+
+    def test_cover_options_have_safe_defaults_and_validate_ranges(self):
+        self.assertEqual(subtitle_video_export.validate_box_options(95, 12, 2), (95, 12, 2))
+        for values in ((89, 12, 2), (101, 12, 2), (95, 4, 2), (95, 36, 2), (95, 12, 11)):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                subtitle_video_export.validate_box_options(*values)
+
+    def test_blur_box_filter_is_added_without_changing_audio_copy(self):
+        cue = subtitle_io.SubtitleCue(1, 1000, 3000, "Original")
+        translated = [subtitle_io.TranslatedCue(cue, "မြန်မာစာ")]
+        command = subtitle_video_export.make_ffmpeg_export_command(
+            "ffmpeg", Path("source.mp4"), Path("out.mp4"), translated,
+            [Path("subtitle.png")], (1920, 1080), 86,
+            cover_style="blur",
+            blur_box={"x": 0.1, "y": 0.8, "w": 0.8, "h": 0.15},
+        )
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertIn("crop=", graph)
+        self.assertIn("boxblur=", graph)
+        self.assertIn("[coverbase][coveredblur]overlay=", graph)
+        self.assertEqual(command[command.index("-map", command.index("-map") + 1) + 1], "0:a?")
+        self.assertEqual(command[command.index("-c:a") + 1], "copy")
+        self.assertNotIn("-an", command)
 
     def test_video_export_validates_original_cue_count_before_rendering(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -375,6 +479,47 @@ class SubtitleVideoWorkflowTests(unittest.TestCase):
             self.assertEqual(next_output.name, "clip_burmese_subs_2.mp4")
             self.assertEqual(source.read_bytes(), b"original")
             self.assertEqual(output.read_bytes(), b"existing")
+
+    def test_output_folder_resolution_uses_source_parent_when_empty(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.mp4"
+            resolved = subtitle_video_export.resolve_output_folder(source, "")
+            self.assertEqual(resolved, Path(folder).resolve())
+            self.assertTrue(resolved.is_dir())
+
+    def test_output_folder_resolution_accepts_existing_folder(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source.mp4"
+            output_folder = root / "existing"
+            output_folder.mkdir()
+            self.assertEqual(
+                subtitle_video_export.resolve_output_folder(source, str(output_folder)),
+                output_folder.resolve(),
+            )
+
+    def test_output_folder_resolution_creates_missing_folder(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source.mp4"
+            output_folder = root / "new" / "nested"
+            resolved = subtitle_video_export.resolve_output_folder(source, str(output_folder))
+            self.assertEqual(resolved, output_folder.resolve())
+            self.assertTrue(resolved.is_dir())
+
+    def test_output_folder_resolution_reports_unwritable_folder(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output_folder = Path(folder) / "locked"
+            with mock.patch.object(
+                subtitle_video_export.tempfile,
+                "mkstemp",
+                side_effect=PermissionError("access denied"),
+            ):
+                with self.assertRaisesRegex(PermissionError, "not writable"):
+                    subtitle_video_export.resolve_output_folder(
+                        Path(folder) / "source.mp4", str(output_folder),
+                    )
+            self.assertTrue(output_folder.is_dir())
 
 
 class SubtitleCueEditorStructureTests(unittest.TestCase):
